@@ -1,0 +1,17 @@
+{
+    "abdominal_wall_cavity": 2,
+    "cystic_duct": 5,
+    "cystic_plate": 0,
+    "gallbladder": 1,
+    "gut": 6,
+    "liver": 4,
+    "omentum": 3,
+    "bipolar": 7,
+    "clipper": 8,
+    "grasper": 9,
+    "hook": 10,
+    "irrigator": 11,
+    "scissors": 12,
+    "specimenbag": 13,
+    "full_frame": 14
+}

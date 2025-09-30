@@ -1,0 +1,10 @@
+{
+    "SPATIAL_REL": {
+            "above": 0, "below": 1, "horizontal": 2, "left": 3, 
+            "right": 4, "within": 5, "vertical": 6, "self": 7,
+            "contributes_to": 8, "influences": 9
+        },
+    "ACTION_REL": {
+        "grasp": 0, "dissect": 1, "coagulate": 2, "retract": 3, "clip": 4, "cut": 5, "pack": 6, "irrigate": 7
+    }
+}

@@ -1,0 +1,40 @@
+{
+    "instrument": {
+        "grasper": 0,
+        "bipolar": 1,
+        "hook": 2,
+        "scissors": 3,
+        "clipper": 4,
+        "irrigator": 5,
+        "null_instrument": 6
+    },
+    "target": {
+        "gallbladder": 0,
+        "cystic_plate": 1,
+        "cystic_duct": 2,
+        "cystic_artery": 3,
+        "cystic_pedicle": 4,
+        "blood_vessel": 5,
+        "fluid": 6,
+        "abdominal_wall_cavity": 7,
+        "liver": 8,
+        "adhesion": 9,
+        "omentum": 10,
+        "peritoneum": 11,
+        "gut": 12,
+        "specimen_bag": 13,
+        "null_target": 14
+    },
+    "verb": {
+        "grasp": 0,
+        "retract": 1,
+        "dissect": 2,
+        "coagulate": 3,
+        "clip": 4,
+        "cut": 5,
+        "aspirate": 6,
+        "irrigate": 7,
+        "pack": 8,
+        "null_verb": 9
+    }
+}
