@@ -1,58 +1,3 @@
-#!/usr/bin/env python3
-"""
-Pre-tokenize Questions Script
-
-This script pre-tokenizes all questions in the dataset and saves them as HDF5 files
-to eliminate CPU overhead from tokenization during training.
-
-Usage:
-    python prepr            # Load questions with ana_type fi    # Print summary
-    print("\n📊 Summary:")
-    for mode in modes:
-        # Check both filtered and unfiltered files
-        tokenized_paths = list(cfg.QUESTIONS_DIR.glob(f"tokenized_{mode}*.h5"))
-        for tokenized_path in tokenized_paths:
-            if tokenized_path.exists():
-                file_size = tokenized_path.stat().st_size / (1024 * 1024)
-                print(f"   {tokenized_path.name}: ({file_size:.1f} MB)")
-    
-    print("\n💡 Usage Examples:")
-    print("   # All questions:")
-    print("   python preprocess_questions.py")
-    print("   # Only zero-hop questions:")  
-    print("   python preprocess_questions.py --ana_type zero_hop.json")
-    print("   # Multiple ana_types:")
-    print("   python preprocess_questions.py --ana_type zero_hop.json one_hop.json")
-    print("   # Specific modes only:")
-    print("   python preprocess_questions.py --modes train val")          questions = load_questions_from_mode(mode, ana_type=args.ana_type)
-            
-            if not questions:
-                print(f"⚠️ No questions found in {mode} mode")
-                continue
-            
-            # Tokenize questions
-            tokenized_data = tokenize_questions_batch(
-                questions, tokenizer, 
-                batch_size=100,  # Adjust based on available memory
-                max_length=128   # Sufficient for most surgical questions
-            )
-            
-            # Save tokenized data with ana_type suffix if filtered
-            if args.ana_type:
-                ana_suffix = "_".join(args.ana_type).replace('.json', '')
-                output_path = cfg.QUESTIONS_DIR / f"tokenized_{mode}_{ana_suffix}.h5"
-            else:
-                output_path = cfg.QUESTIONS_DIR / f"tokenized_{mode}.h5"
-                
-            save_tokenized_data(tokenized_data, output_path)y
-
-Output:
-    - tokenized_questions/tokenized_train.h5
-    - tokenized_questions/tokenized_val.h5
-    - tokenized_questions/tokenized_test.h5
-    - tokenized_questions/tokenized_debug.h5
-"""
-
 import os
 import h5py
 import json
@@ -63,6 +8,34 @@ from tqdm import tqdm
 import numpy as np
 
 import config as cfg
+
+
+# Valid ana_type values to avoid confusion with coordinates or other attributes
+VALID_ANA_TYPES = {
+    'zero_hop.json',
+    'one_hop.json', 
+    'single_and.json'
+}
+
+
+def normalize_answer(answer):
+    """
+    Normalize answer labels to handle duplicates/variations
+    
+    Args:
+        answer: Original answer string
+        
+    Returns:
+        Normalized answer string
+    """
+    # Handle specimen bag variations
+    if answer.strip().lower() == "specimenbag":
+        return "specimen_bag"
+    
+    # Add other normalizations here if needed
+    # Example: answer = answer.strip().lower()
+    
+    return answer.strip()
 
 
 def load_questions_from_mode(mode, ana_type=None):
@@ -92,7 +65,7 @@ def load_questions_from_mode(mode, ana_type=None):
                         parts = line.split("|")
                         if len(parts) >= 2:
                             question = parts[0].strip()
-                            answer = parts[1].strip()
+                            answer = normalize_answer(parts[1].strip())
                             
                             # Extract ana_type information if available
                             ana_type_info = None
@@ -100,7 +73,11 @@ def load_questions_from_mode(mode, ana_type=None):
                             location = None
                             
                             if len(parts) >= 3:
-                                ana_type_info = parts[2].strip()
+                                potential_ana_type = parts[2].strip()
+                                # Only set ana_type if it's a valid value (avoid coordinates confusion)
+                                if potential_ana_type in VALID_ANA_TYPES:
+                                    ana_type_info = potential_ana_type
+                                    
                             if len(parts) >= 4:
                                 query_type = parts[3].strip()
                             if len(parts) >= 5:
@@ -109,7 +86,7 @@ def load_questions_from_mode(mode, ana_type=None):
                             # Filter by ana_type if specified
                             if ana_type:
                                 if not ana_type_info or ana_type_info not in ana_type:
-                                    continue  # Skip this question if no ana_type or not in filter
+                                    continue  # Skip this question if no valid ana_type or not in filter
                             
                             # Store question with full metadata
                             questions.append({
@@ -126,6 +103,11 @@ def load_questions_from_mode(mode, ana_type=None):
             continue
     
     print(f"✅ Loaded {len(questions)} questions from {mode}")
+    
+    # Print validation statistics
+    total_with_valid_ana_type = sum(1 for q in questions if q.get('ana_type'))
+    if total_with_valid_ana_type > 0:
+        print(f"📋 {total_with_valid_ana_type} questions have valid ana_type")
     
     # Print ana_type statistics if filtering was applied
     if ana_type or any(q.get('ana_type') for q in questions):
@@ -286,9 +268,9 @@ def main():
             # Save tokenized data with ana_type suffix if filtered
             if args.ana_type:
                 ana_suffix = "_".join(args.ana_type).replace('.json', '')
-                output_path = cfg.QUESTIONS_DIR / f"tokenized_{mode}_{ana_suffix}.h5"
+                output_path = cfg.TOKENIZED_QUESTIONS_DIR / f"tokenized_{mode}_{ana_suffix}.h5"
             else:
-                output_path = cfg.QUESTIONS_DIR / f"tokenized_{mode}.h5"
+                output_path = cfg.TOKENIZED_QUESTIONS_DIR / f"tokenized_{mode}.h5"
             save_tokenized_data(tokenized_data, output_path)
             
         except Exception as e:
