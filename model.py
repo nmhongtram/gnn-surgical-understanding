@@ -486,6 +486,7 @@ class SSGModel(nn.Module):
         Focal Loss for addressing class imbalance without prior class weights
         
         Paper: "Focal Loss for Dense Object Detection" (Lin et al.)
+        NOTE: Currently not used - kept for potential ablation studies
         
         Args:
             predictions: Logits [batch_size, num_classes]
@@ -517,7 +518,7 @@ class SSGModel(nn.Module):
     
     def compute_vqa_only_loss(self, outputs, vqa_labels):
         """
-        Simple VQA-only loss computation using focal loss for class imbalance
+        Standard VQA-only loss computation using cross entropy
         
         Args:
             outputs: VQA logits [batch_size, num_classes]
@@ -526,5 +527,5 @@ class SSGModel(nn.Module):
         Returns:
             VQA loss (scalar tensor)
         """
-        # Use focal loss to handle VQA class imbalance
-        return self._focal_loss(outputs, vqa_labels, alpha=1.0, gamma=2.0)
+        # Use standard cross entropy loss (VQA community standard)
+        return F.cross_entropy(outputs, vqa_labels)
