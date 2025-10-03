@@ -178,6 +178,7 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
     # Resume from checkpoint if provided
     start_epoch = 0
     best_val_acc = 0.0
+    best_val_loss = 100.0
     
     if resume_from and os.path.exists(resume_from):
         print(f"\n📂 Loading checkpoint from {resume_from}")
@@ -187,6 +188,7 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
         best_val_acc = checkpoint.get('val_acc', 0.0)
+        best_val_loss = checkpoint.get('val_loss', 100.0)
         
         # Resume scheduler state if available
         if 'scheduler_state_dict' in checkpoint:
@@ -317,7 +319,8 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
             print(f"GPU Memory: {gpu_allocated:.1f}GB/{gpu_memory:.1f}GB (cached: {gpu_cached:.1f}GB)")
         
         # Save best model
-        if val_acc > best_val_acc:
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             best_val_acc = val_acc
             checkpoint_path = '/kaggle/working/checkpoints/best_vqa_model.pth'
             os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
@@ -331,7 +334,7 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
                 'train_acc': train_acc,
                 'train_loss': train_loss,
             }, checkpoint_path)
-            print(f"✅ New best model saved! Val Acc: {val_acc:.2f}%")
+            print(f"✅ New best model saved! Val Loss: {val_loss:.4f}")
         
         # Save regular checkpoint every few epochs
         # if (epoch + 1) % 5 == 0 or epoch == NUM_EPOCHS - 1:
@@ -347,6 +350,7 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
             'train_acc': train_acc,
             'train_loss': train_loss,
             'best_val_acc': best_val_acc,
+            'best_val_loss': best_val_loss
         }, checkpoint_path)
         print(f"📁 Checkpoint saved at epoch {epoch + 1}")
     
