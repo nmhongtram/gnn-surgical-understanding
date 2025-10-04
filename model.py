@@ -209,8 +209,17 @@ class SSGModel(nn.Module):
             nn.LayerNorm(hidden_dim)
         )
             
-        # Question projection to match graph feature dimension
-        self.question_projection = nn.Linear(question_dim, hidden_dim)
+        # # Question projection to match graph feature dimension
+        # self.question_projection = nn.Linear(question_dim, hidden_dim)
+
+        # Enhanced Question Feature Preprocessing (symmetric với visual)
+        self.question_preprocessing = nn.Sequential(
+            nn.Linear(question_dim, hidden_dim),        # 768 → hidden_dim
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),          # hidden_dim → hidden_dim
+            nn.LayerNorm(hidden_dim)
+        )
         
         # VisualBERT-style cross-modal attention fusion
         self.cross_modal_attention = nn.MultiheadAttention(
@@ -400,9 +409,11 @@ class SSGModel(nn.Module):
             pooled_graph_batch = torch.mean(graph_features, dim=0, keepdim=True)  # [1, hidden_dim]
             pooled_graph_batch = pooled_graph_batch.repeat(batch_size, 1)  # [batch_size, hidden_dim]
         
-        # Project question sequence to match graph dimension
-        question_sequence_proj = self.question_projection(question_sequence)  # [batch, seq_len, hidden_dim]
-        
+        # # Project question sequence to match graph dimension
+        # question_sequence_proj = self.question_projection(question_sequence)  # [batch, seq_len, hidden_dim]
+
+        question_sequence_proj = self.question_preprocessing(question_sequence)  # [batch, seq_len, hidden_dim]
+
         # VisualBERT-style cross-modal fusion with specialized attention
         # 1. Project graph features to batch dimension
         graph_features_batch = graph_features.unsqueeze(0).repeat(batch_size, 1, 1)  # [batch, num_nodes, hidden_dim]
