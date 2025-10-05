@@ -166,15 +166,12 @@ class SSGModel(nn.Module):
             ])
             
         elif gnn_type == 'none':
-            # No GNN - Baseline with simple MLP processing
+            # Simplified baseline MLP - reduced capacity for fair GNN comparison
             self.baseline_mlp = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim // 2),  # Reduce hidden dimension
                 nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(hidden_dim, hidden_dim)
+                nn.Dropout(0.3),  # Increase dropout for more regularization
+                nn.Linear(hidden_dim // 2, hidden_dim)  # Only 2 layers instead of 3
             )
             # Standard normalization for baseline
             self.baseline_norm = nn.LayerNorm(hidden_dim)
