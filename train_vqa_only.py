@@ -1,64 +1,8 @@
 #!/usr/bin/env python3
 """
-VQA-Only Training Script
+VQA-Only Training Script with Mixed Precision Support
 
-Simple training script for surgical VQA without triplet prediction
-
-cụ thể xét theo query_type:: 
-câu hỏi general trả về ["abdominal_wall_cavity",
-    "adhesion",
-    "aspirate",
-    "bipolar",
-    "blood_vessel", "clip",
-    "clipper",
-    "coagulate",
-    "cut",
-    "cystic_artery",
-    "cystic_duct",
-    "cystic_pedicle",
-    "cystic_plate",
-    "dissect",
-    "fluid",
-    "gallbladder",
-    "grasp",
-    "grasper",
-    "gut",
-    "hook",  "irrigate",
-    "irrigator",
-    "liver",
-    "omentum",
-    "pack",
-    "peritoneum", "retract",
-    "scissors",
-    "silver",
-    "specimen_bag"]
-câu hỏi ana_type = count thì trả về số. 
-câu hỏi query_component trả về tập hợp của instrument + anatomy 
-["abdominal_wall_cavity",
-    "adhesion",
-    "aspirate",
-    "bipolar",
-    "blood_vessel", 
-    "clipper",
-    "cystic_artery",
-    "cystic_duct",
-    "cystic_pedicle",
-    "cystic_plate",
-    "fluid",
-    "gallbladder",
-    "grasper",
-    "gut",
-    "hook",  
-    "irrigator",
-    "liver",
-    "omentum",
-    "peritoneum", 
-    "scissors",
-    "silver",
-    "specimen_bag"]
-câu hỏi query_color trả về tập hợp màu sắc [white, yellow, silver, red, blue, brown]
-câu hỏi exist trả về [True, False]
-câu hỏi query type trả về [instrument, anatomy]
+Enhanced with Automatic Mixed Precision (AMP) for faster training
 """
 
 import os
@@ -66,24 +10,27 @@ import sys
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler  # ✨ Mixed Precision imports
 from tqdm import tqdm
 import time
 
 # Configure tqdm for Kaggle environment
 tqdm.pandas()
-os.environ['TQDM_DISABLE'] = '0'  # Ensure tqdm is enabled
+os.environ['TQDM_DISABLE'] = '0'
 
-# Progress bar settings - change this if tqdm has issues
-USE_TQDM = True  # Set to False to use manual progress printing
-MANUAL_PROGRESS_INTERVAL = 10  # Print every N batches when not using tqdm
+# Progress bar settings
+USE_TQDM = True
+MANUAL_PROGRESS_INTERVAL = 10
 
 # Local imports
 from ssg_dataset import SSGDataset, vqa_only_collate_fn
-from model import SSGModel
+from full_enhanced_model import create_full_enhanced_model
 from collections import defaultdict
 import json
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support, classification_report
+from scipy.stats import chisquare
+import re
 
 
 def create_progress_bar(iterable, desc, leave=False):
@@ -95,34 +42,52 @@ def create_progress_bar(iterable, desc, leave=False):
         return iterable
 
 
-
-from scipy.stats import chisquare
-import re
-
-
-def train_vqa_only(resume_from=None, gnn_type="gcn"):
-    """Train VQA-only model without triplet prediction
+def train_vqa_only(resume_from=None, gnn_type="gcn", use_mixed_precision=True):
+    """Train VQA-only model with Mixed Precision support
     
     Args:
         resume_from (str): Path to checkpoint file to resume from
+        gnn_type (str): GNN architecture type
+        use_mixed_precision (bool): Enable Automatic Mixed Precision training
     """
     
-    print("🚀 VQA-Only Training")
-    print("=" * 40)
+    print("🚀 VQA-Only Training with Enhanced Features")
+    print("=" * 50)
     
     # Setup
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    # Training config
-    BATCH_SIZE = 64
-    LEARNING_RATE = 1e-4  # Lower LR for stable training and reduced overfitting
-    WEIGHT_DECAY = 1e-4   # Moderate weight decay (reduced from 1e-2)
-    NUM_EPOCHS = 10
-    GRAD_CLIP_NORM = 1.0  # Gradient clipping threshold
+    # 🔥 Mixed Precision Setup
+    if use_mixed_precision and device.type == 'cuda':
+        # Check if GPU supports mixed precision
+        gpu_name = torch.cuda.get_device_name(0)
+        has_tensor_cores = 'T4' in gpu_name or 'V100' in gpu_name or 'A100' in gpu_name or 'RTX' in gpu_name
+        
+        print(f"GPU: {gpu_name}")
+        print(f"Tensor Cores: {'✅ Available' if has_tensor_cores else '❌ Not available (P100 etc.)'}")
+        
+        if has_tensor_cores:
+            print("🚀 Mixed Precision Training: ENABLED (with speed boost)")
+        else:
+            print("💾 Mixed Precision Training: ENABLED (memory savings only)")
+            
+        scaler = GradScaler()
+    else:
+        use_mixed_precision = False
+        scaler = None
+        print("❌ Mixed Precision Training: DISABLED")
     
-    print(f"Batch size: {BATCH_SIZE}")
+    # Training config
+    # 🎯 Increase batch size if using mixed precision (more memory available)
+    BATCH_SIZE = 128 if use_mixed_precision else 64  # ✨ Larger batch with mixed precision
+    LEARNING_RATE = 1e-4
+    WEIGHT_DECAY = 1e-4
+    NUM_EPOCHS = 10
+    GRAD_CLIP_NORM = 1.0
+    
+    print(f"Batch size: {BATCH_SIZE} {'(increased due to mixed precision)' if use_mixed_precision and BATCH_SIZE > 64 else ''}")
     print(f"Learning rate: {LEARNING_RATE}")
     print(f"Weight decay: {WEIGHT_DECAY}")
     print(f"Epochs: {NUM_EPOCHS}")
@@ -160,8 +125,19 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
     print(f"Validation batches: {len(val_loader)}")
     
     # Create model
-    print("\n🤖 Creating model...")
-    model = SSGModel(gnn_type=gnn_type).to(device)
+    print("\n🤖 Creating full enhanced model...")
+    model_config = {
+        'gnn_type': gnn_type,
+        'hidden_dim': 768,
+        'num_transformer_layers': 4,
+        'num_cross_modal_layers': 2,
+        'num_gnn_layers': 3,
+        'dropout_prob': 0.1,
+        'add_cross_modal_attention': True,
+        'scene_nodes_count': 8,       # Multi-node scene representation
+        'object_class_embed_dim': 384 # Improved object embeddings (no truncation)
+    }
+    model = create_full_enhanced_model(**model_config).to(device)
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -170,9 +146,9 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     
-    # Learning rate scheduler - Reduce on plateau (adaptive)
+    # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3, verbose=True, min_lr=1e-7
+        optimizer, mode='min', factor=0.3, patience=2, verbose=True, min_lr=1e-8
     )
     
     # Resume from checkpoint if provided
@@ -190,13 +166,16 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
         best_val_acc = checkpoint.get('val_acc', 0.0)
         best_val_loss = checkpoint.get('val_loss', 100.0)
         
-        # Resume scheduler state if available
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
+        # 🔥 Resume scaler state for mixed precision
+        if use_mixed_precision and 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            print("✅ Mixed precision scaler state resumed")
+        
         print(f"✅ Resumed from epoch {start_epoch}, best val acc: {best_val_acc:.2f}%")
         
-        # Debug: Show scheduler state after resume
         if hasattr(scheduler, 'num_bad_epochs'):
             print(f"📊 Scheduler state: patience={scheduler.num_bad_epochs}/{scheduler.patience}, best={scheduler.best:.4f}")
     elif resume_from:
@@ -205,6 +184,10 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
     
     # Training loop
     print(f"\n🏋️ Starting training from epoch {start_epoch + 1}...")
+    
+    # 📊 Track mixed precision statistics
+    if use_mixed_precision:
+        mp_stats = {'scale_updates': 0, 'skipped_steps': 0, 'total_steps': 0}
     
     for epoch in range(start_epoch, NUM_EPOCHS):
         print(f"\nEpoch {epoch+1}/{NUM_EPOCHS}")
@@ -218,29 +201,60 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
         
         train_pbar = create_progress_bar(enumerate(train_loader), desc="Training", leave=False)
         
+        # 📊 Track training time for mixed precision comparison
+        epoch_start_time = time.time()
+        
         for batch_idx, batch in train_pbar:
             
-            graph_batch, questions_batch, vqa_labels = batch
+            batch = batch.to(device)
             
-            # Move to device
-            graph_batch = graph_batch.to(device)
-            questions_batch = {k: v.to(device) for k, v in questions_batch.items()}
-            vqa_labels = vqa_labels.to(device)
+            questions_batch = {
+                'input_ids': batch.input_ids,
+                'attention_mask': batch.attention_mask,
+                'token_type_ids': batch.token_type_ids
+            }
+            vqa_labels = batch.y
             
-            # Forward pass
             optimizer.zero_grad()
-            outputs = model(graph_batch, questions_batch)
             
-            # Compute loss
-            loss = model.compute_vqa_only_loss(outputs, vqa_labels)
+            # 🚀 Mixed Precision Forward Pass
+            if use_mixed_precision:
+                with autocast():
+                    outputs = model(batch, questions_batch)
+                    loss = model.compute_loss(outputs, vqa_labels)
+            else:
+                outputs = model(batch, questions_batch)
+                loss = model.compute_loss(outputs, vqa_labels)
             
-            # Backward pass
-            loss.backward()
-            
-            # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
-            
-            optimizer.step()
+            # 🚀 Mixed Precision Backward Pass
+            if use_mixed_precision:
+                # Scale loss to prevent gradient underflow
+                scaler.scale(loss).backward()
+                
+                # Unscale gradients for clipping
+                scaler.unscale_(optimizer)
+                
+                # Gradient clipping on unscaled gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
+                
+                # Update with scaler
+                scaler.step(optimizer)
+                scale_before = scaler.get_scale()
+                scaler.update()
+                scale_after = scaler.get_scale()
+                
+                # Track mixed precision statistics
+                mp_stats['total_steps'] += 1
+                if scale_after != scale_before:
+                    mp_stats['scale_updates'] += 1
+                if scale_after < scale_before:  # Scale decreased = step was skipped
+                    mp_stats['skipped_steps'] += 1
+                    
+            else:
+                # Regular backward pass
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
+                optimizer.step()
             
             # Statistics
             train_loss += loss.item()
@@ -248,13 +262,22 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
             train_total += vqa_labels.size(0)
             train_correct += (predicted == vqa_labels).sum().item()
             
-            # Update progress bar every 10 batches to reduce output noise
+            # Update progress bar with mixed precision info
             if batch_idx % 10 == 0:
-                train_pbar.set_postfix({
+                progress_dict = {
                     'Loss': f'{loss.item():.4f}',
                     'Acc': f'{100 * train_correct / train_total:.2f}%'
-                })
-                train_pbar.refresh()  # Force refresh for Kaggle
+                }
+                
+                # Add mixed precision info to progress bar
+                if use_mixed_precision:
+                    progress_dict['Scale'] = f'{scaler.get_scale():.0f}'
+                
+                train_pbar.set_postfix(progress_dict)
+                train_pbar.refresh()
+        
+        # Calculate epoch time
+        epoch_time = time.time() - epoch_start_time
         
         # Calculate training metrics
         train_loss /= len(train_loader)
@@ -271,16 +294,23 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
             
             for batch_idx, batch in val_pbar:
                 
-                graph_batch, questions_batch, vqa_labels = batch
+                batch = batch.to(device)
                 
-                # Move to device
-                graph_batch = graph_batch.to(device)
-                questions_batch = {k: v.to(device) for k, v in questions_batch.items()}
-                vqa_labels = vqa_labels.to(device)
+                questions_batch = {
+                    'input_ids': batch.input_ids,
+                    'attention_mask': batch.attention_mask,
+                    'token_type_ids': batch.token_type_ids
+                }
+                vqa_labels = batch.y
                 
-                # Forward pass
-                outputs = model(graph_batch, questions_batch)
-                loss = model.compute_vqa_only_loss(outputs, vqa_labels)
+                # 🚀 Mixed Precision Validation (optional, saves memory)
+                if use_mixed_precision:
+                    with autocast():
+                        outputs = model(batch, questions_batch)
+                        loss = model.compute_loss(outputs, vqa_labels)
+                else:
+                    outputs = model(batch, questions_batch)
+                    loss = model.compute_loss(outputs, vqa_labels)
                 
                 # Statistics
                 val_loss += loss.item()
@@ -292,31 +322,37 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
                     'Loss': f'{loss.item():.4f}',
                     'Acc': f'{100 * val_correct / val_total:.2f}%'
                 })
-                val_pbar.refresh()  # Force refresh for Kaggle
+                val_pbar.refresh()
         
         # Calculate validation metrics
         val_loss /= len(val_loader)
         val_acc = 100 * val_correct / val_total
         
-        # Step scheduler with validation loss (ReduceLROnPlateau)
+        # Step scheduler with validation loss
         scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
         
-        # Clear GPU cache after each epoch to prevent memory accumulation
+        # Clear GPU cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            # Optional: print GPU memory usage
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
             gpu_allocated = torch.cuda.memory_allocated(0) / 1024**3
             gpu_cached = torch.cuda.memory_reserved(0) / 1024**3
         
-        # Print epoch results
+        # Print epoch results with mixed precision stats
         print(f"\nEpoch {epoch+1} Results:")
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
         print(f"Learning Rate: {current_lr:.6f}")
+        print(f"Epoch Time: {epoch_time:.1f}s")
+        
         if torch.cuda.is_available():
             print(f"GPU Memory: {gpu_allocated:.1f}GB/{gpu_memory:.1f}GB (cached: {gpu_cached:.1f}GB)")
+        
+        # 📊 Mixed precision statistics
+        if use_mixed_precision:
+            skip_rate = 100 * mp_stats['skipped_steps'] / max(mp_stats['total_steps'], 1)
+            print(f"Mixed Precision: Scale={scaler.get_scale():.0f}, Skipped Steps={skip_rate:.1f}%")
         
         # Save best model
         if val_loss < best_val_loss:
@@ -324,7 +360,9 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
             best_val_acc = val_acc
             checkpoint_path = '/kaggle/working/checkpoints/best_vqa_model.pth'
             os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-            torch.save({
+            
+            # 🔥 Save checkpoint with mixed precision state
+            checkpoint_dict = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -333,14 +371,23 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
                 'val_loss': val_loss,
                 'train_acc': train_acc,
                 'train_loss': train_loss,
-            }, checkpoint_path)
+                'model_config': model_config,
+                'mixed_precision_enabled': use_mixed_precision,
+            }
+            
+            # Add scaler state if using mixed precision
+            if use_mixed_precision:
+                checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
+                checkpoint_dict['mp_stats'] = mp_stats.copy()
+            
+            torch.save(checkpoint_dict, checkpoint_path)
             print(f"✅ New best model saved! Val Loss: {val_loss:.4f}")
         
-        # Save regular checkpoint every few epochs
-        # if (epoch + 1) % 5 == 0 or epoch == NUM_EPOCHS - 1:
+        # Save regular checkpoint
         checkpoint_path = f'/kaggle/working/checkpoints/checkpoint_epoch_{epoch + 1}.pth'
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-        torch.save({
+        
+        checkpoint_dict = {
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -350,12 +397,29 @@ def train_vqa_only(resume_from=None, gnn_type="gcn"):
             'train_acc': train_acc,
             'train_loss': train_loss,
             'best_val_acc': best_val_acc,
-            'best_val_loss': best_val_loss
-        }, checkpoint_path)
+            'best_val_loss': best_val_loss,
+            'model_config': model_config,
+            'mixed_precision_enabled': use_mixed_precision,
+        }
+        
+        if use_mixed_precision:
+            checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
+            checkpoint_dict['mp_stats'] = mp_stats.copy()
+        
+        torch.save(checkpoint_dict, checkpoint_path)
         print(f"📁 Checkpoint saved at epoch {epoch + 1}")
     
     print(f"\n🎉 Training completed!")
     print(f"Best validation accuracy: {best_val_acc:.2f}%")
+    
+    # 📊 Final mixed precision statistics
+    if use_mixed_precision:
+        print(f"\n🚀 Mixed Precision Statistics:")
+        print(f"Total training steps: {mp_stats['total_steps']}")
+        print(f"Scale updates: {mp_stats['scale_updates']}")
+        print(f"Skipped steps: {mp_stats['skipped_steps']} ({100*mp_stats['skipped_steps']/max(mp_stats['total_steps'],1):.1f}%)")
+        print(f"Final scale factor: {scaler.get_scale():.0f}")
+
 
 
 def get_valid_answers_for_question(metadata, answer_vocab):
@@ -523,11 +587,30 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
     print(f"Test batches: {len(test_loader)}")
     
     # Load model
-    print("\n🤖 Loading trained model...")
-    model = SSGModel(gnn_type=gnn_type).to(device)
+    print("\n🤖 Loading trained full enhanced model...")
     
     if os.path.exists(model_path):
         checkpoint = torch.load(model_path, map_location=device)
+        
+        # Use saved model config if available, otherwise use default
+        if 'model_config' in checkpoint:
+            model_config = checkpoint['model_config']
+            print("✅ Using saved model configuration")
+        else:
+            model_config = {
+                'gnn_type': 'gat',
+                'hidden_dim': 768,  # Keep high capacity for complex reasoning
+                'num_transformer_layers': 4,  # Reduced from 4 - faster while maintaining performance
+                'num_cross_modal_layers': 2,
+                'num_gnn_layers': 3,          # Keep high for graph reasoning
+                'dropout_prob': 0.1,
+                'add_cross_modal_attention': True,
+                'scene_nodes_count': 8,       # Multi-node scenes
+                'object_class_embed_dim': 384 # Improved embeddings
+            }
+            print("⚠️ Using default model configuration (saved config not found)")
+        
+        model = create_full_enhanced_model(**model_config).to(device)
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"✅ Model loaded from epoch {checkpoint.get('epoch', 'unknown')}")
         if 'val_acc' in checkpoint:
@@ -562,15 +645,19 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
         
         for batch_idx, batch in test_pbar:
             
-            graph_batch, questions_batch, vqa_labels = batch
+            # New collate function returns single batch object
+            batch = batch.to(device)
             
-            # Move to device
-            graph_batch = graph_batch.to(device)
-            questions_batch = {k: v.to(device) for k, v in questions_batch.items()}
-            vqa_labels = vqa_labels.to(device)
+            # Extract questions and labels from batch
+            questions_batch = {
+                'input_ids': batch.input_ids,
+                'attention_mask': batch.attention_mask,
+                'token_type_ids': batch.token_type_ids
+            }
+            vqa_labels = batch.y
             
             # Forward pass
-            outputs = model(graph_batch, questions_batch)
+            outputs = model(batch, questions_batch)
             _, predicted = torch.max(outputs, 1)
             
             # Collect predictions and labels
@@ -795,18 +882,19 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
 
 
 if __name__ == "__main__":
-    # For Kaggle: Simply call the function with resume path if needed
+    # === TRAINING WITH MIXED PRECISION ===
+    resume_checkpoint = None
     
-    # === TRAINING ===
-    # To resume from checkpoint, change the path below:
-    resume_checkpoint = None  # Set to checkpoint path to resume  
-    # resume_checkpoint = "/kaggle/working/checkpoints/checkpoint_epoch_5.pth"  # Example
+    # 🚀 Enable mixed precision training
+    # Set to False if you want to disable mixed precision
+    use_mixed_precision = True
+    
+    print(f"🎯 Mixed Precision Training: {'ENABLED' if use_mixed_precision else 'DISABLED'}")
     
     # Uncomment to train
-    train_vqa_only(resume_from=resume_checkpoint, gnn_type='gcn')
+    train_vqa_only(resume_from=resume_checkpoint, gnn_type='gat', use_mixed_precision=use_mixed_precision)
     
     # === EVALUATION ===
-    # To evaluate on test set, uncomment and set model path:
-    # model_path = "/kaggle/working/checkpoints/best_vqa_model.pth"
-    # results = evaluate_on_test(model_path, gnn_type="gcn", batch_size=32)
+    # model_path = "/kaggle/working/checkpoints/best_vqa_model.pth" 
+    # results = evaluate_on_test(model_path, gnn_type="gat", batch_size=32)
     # print(f"\nFinal test accuracy: {results['overall']['accuracy']:.2f}%")
