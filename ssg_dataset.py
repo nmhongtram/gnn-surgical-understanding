@@ -508,9 +508,9 @@ class SSGDataset(Dataset):
 
 def vqa_only_collate_fn(batch):
     """
-    VQA-only collate function for simplified training
+    Enhanced collate function for full enhanced model training
     
-    Handles only graph data, questions, and VQA labels (no triplet data)
+    Handles graph data, questions, and VQA labels - compatible with full enhanced model
     """
     # Fast null check
     if not batch:
@@ -518,37 +518,38 @@ def vqa_only_collate_fn(batch):
         
     # VQA-only data extraction
     graph_data_list = []
-    tokenized_questions = []
-    vqa_labels = []
+    input_ids_list = []
+    attention_mask_list = []
+    token_type_ids_list = []
+    labels = []
     
     # Handle VQA-only format: (graph_data, question, vqa_label)
     for item in batch:
         if len(item) == 3:  # VQA-only format
             graph_data, tokenized_question, vqa_label = item
             graph_data_list.append(graph_data)
-            tokenized_questions.append(tokenized_question)
-            vqa_labels.append(vqa_label)
+            
+            input_ids_list.append(tokenized_question['input_ids'])
+            attention_mask_list.append(tokenized_question['attention_mask'])
+            
+            # Handle token_type_ids if present
+            if 'token_type_ids' in tokenized_question:
+                token_type_ids_list.append(tokenized_question['token_type_ids'])
+            else:
+                # Create zeros if not present
+                token_type_ids_list.append(torch.zeros_like(tokenized_question['input_ids']))
+                
+            labels.append(vqa_label)
         else:
             raise ValueError(f"Expected 3 items per batch sample for VQA-only, got {len(item)}")
     
-    # Batch graph data
+    # Batch graph data using PyTorch Geometric
     batched_graph = Batch.from_data_list(graph_data_list)
     
-    # Stack pre-tokenized questions
-    input_ids = torch.stack([q['input_ids'] for q in tokenized_questions])
-    attention_mask = torch.stack([q['attention_mask'] for q in tokenized_questions])
-    questions_batch = {
-        'input_ids': input_ids,
-        'attention_mask': attention_mask
-    }
+    # Add tokenized questions to batch (compatible with full enhanced model)
+    batched_graph.input_ids = torch.stack(input_ids_list, dim=0)
+    batched_graph.attention_mask = torch.stack(attention_mask_list, dim=0)
+    batched_graph.token_type_ids = torch.stack(token_type_ids_list, dim=0)
+    batched_graph.y = torch.tensor(labels, dtype=torch.long)
     
-    # Add token_type_ids if available
-    if tokenized_questions and 'token_type_ids' in tokenized_questions[0]:
-        token_type_ids = torch.stack([q['token_type_ids'] for q in tokenized_questions])
-        questions_batch['token_type_ids'] = token_type_ids
-    
-    # Stack VQA labels
-    vqa_batch = torch.tensor(vqa_labels, dtype=torch.long)
-
-    # Return VQA-only format
-    return batched_graph, questions_batch, vqa_batch
+    return batched_graph
