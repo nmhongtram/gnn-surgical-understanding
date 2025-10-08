@@ -14,6 +14,8 @@ from torch.cuda.amp import autocast, GradScaler  # ✨ Mixed Precision imports
 from tqdm import tqdm
 import time
 
+import config as cfg
+
 # Configure tqdm for Kaggle environment
 tqdm.pandas()
 os.environ['TQDM_DISABLE'] = '0'
@@ -435,7 +437,7 @@ def get_valid_answers_for_question(metadata, answer_vocab):
     """
     # Get query_type and ana_type from metadata
     query_type = metadata.get('query_type', 'general') if isinstance(metadata, dict) else 'general'
-    ana_type = metadata.get('ana_type', None) if isinstance(metadata, dict) else None
+    ana_type = metadata.get('ana_type', 'general') if isinstance(metadata, dict) else 'general'
     
     # Count questions (ana_type indicates counting)
     if query_type == 'count' or (ana_type and 'count' in str(ana_type).lower()):
@@ -621,7 +623,6 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
     # Load answer vocabulary for validity and distribution analysis
     print("\n📚 Loading answer vocabulary...")
     try:
-        import config as cfg
         with open(cfg.META_INFO_DIR / "label2ans.json") as f:
             answer_vocab = json.load(f)
         print(f"✅ Loaded {len(answer_vocab)} answer classes")
@@ -679,6 +680,12 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
                         _, metadata = test_dataset.vqas[sample_idx]
                         ana_type = metadata.get('ana_type', 'general')
                         query_type = metadata.get('query_type', 'general')
+                        
+                        # Safety check: ensure no None values
+                        if ana_type is None:
+                            ana_type = 'general'
+                        if query_type is None:
+                            query_type = 'general'
                     else:
                         # Fallback: try to get from original format
                         ana_type = 'general'
@@ -767,8 +774,14 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
         print("-" * 85)
         print(f"{type_name.capitalize():<20} {'Accuracy':<10} {'Precision':<10} {'Recall':<10} {'F1-Score':<10} {'Samples':<8}")
         print("-" * 85)
+
+        # Filter out None values and sort the rest, handle None separately
+        non_none_types = [k for k in type_stats.keys() if k is not None]
+        sorted_types = sorted(non_none_types)
         
-        sorted_types = sorted(type_stats.keys())
+        # Add None at the end if it exists
+        if None in type_stats:
+            sorted_types.append(None)
         
         for qtype in sorted_types:
             stats = type_stats[qtype]
@@ -785,7 +798,9 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
             else:
                 precision = recall = f1 = 0.0
             
-            print(f"{qtype:<20} {acc:>6.2f}%    {precision:>8.4f}   {recall:>8.4f}   {f1:>8.4f}   {stats['total']:>6}")
+            # Handle None display properly
+            display_name = str(qtype) if qtype is not None else "Unknown/None"
+            print(f"{display_name:<20} {acc:>6.2f}%    {precision:>8.4f}   {recall:>8.4f}   {f1:>8.4f}   {stats['total']:>6}")
     
     # Group predictions by both ana_type and query_type
     ana_type_predictions = defaultdict(list)
@@ -799,6 +814,12 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
                 _, metadata = test_dataset.vqas[i]
                 ana_type = metadata.get('ana_type', 'general')
                 query_type = metadata.get('query_type', 'general')
+                
+                # Safety check: ensure no None values
+                if ana_type is None:
+                    ana_type = 'general'
+                if query_type is None:
+                    query_type = 'general'
             else:
                 ana_type = 'general'
                 query_type = 'general'
@@ -835,7 +856,14 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
     # Add detailed results for both question type categories
     def add_detailed_results(results_dict, type_stats, type_predictions, type_labels, category_key):
         results_dict[category_key] = {}
-        sorted_types = sorted(type_stats.keys())
+        
+        # Filter out None values and sort the rest, handle None separately
+        non_none_types = [k for k in type_stats.keys() if k is not None]
+        sorted_types = sorted(non_none_types)
+        
+        # Add None at the end if it exists
+        if None in type_stats:
+            sorted_types.append(None)
         
         for qtype in sorted_types:
             stats = type_stats[qtype]
@@ -852,7 +880,9 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
             else:
                 precision = recall = f1 = 0.0
             
-            results_dict[category_key][qtype] = {
+            # Convert None keys to string for JSON compatibility
+            json_key = str(qtype) if qtype is not None else "unknown_none"
+            results_dict[category_key][json_key] = {
                 'accuracy': acc,
                 'precision': float(precision),
                 'recall': float(recall),
