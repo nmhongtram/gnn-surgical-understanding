@@ -1,4 +1,8 @@
 VID22/
+checkpoints/
+questions/
+scene_graphs/
+visual_features/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
