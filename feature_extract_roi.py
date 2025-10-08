@@ -18,19 +18,22 @@ from glob import glob
 
 import torch
 from torch import nn
-from torchvision import models
+# from torchvision import models
+import torchvision.models as models
+from torchvision.models import ResNet18_Weights
 import json
 from torchvision.ops import roi_pool, roi_align
 import torch.nn.functional as F
 
 
-class FeatureExtractor(nn.Module):
+class FeatureROIExtractor(nn.Module):
     def __init__(
         self,
     ):
-        super(FeatureExtractor, self).__init__()
+        super(FeatureROIExtractor, self).__init__()
         # visual feature extraction
-        self.img_feature_extractor = models.resnet18(pretrained=True)
+        # hoặc dùng weights mới nhất được recommend
+        self.img_feature_extractor = models.resnet18(weights=ResNet18_Weights.DEFAULT)
         self.img_feature_extractor = torch.nn.Sequential(
             *(list(self.img_feature_extractor.children())[:-2])
         )
@@ -38,7 +41,7 @@ class FeatureExtractor(nn.Module):
 
     def forward(self, img, boxes, classes):
         if len(boxes[0]) == 0:
-            final_outputs = torch.zeros((self.max_bbox, 530)).cuda()
+            final_outputs = torch.zeros((1, 530)).cuda()
             return final_outputs
 
         outputs = self.img_feature_extractor(img)
@@ -52,10 +55,10 @@ class FeatureExtractor(nn.Module):
             [[i[0] / 860, i[1] / 480, i[2] / 860, i[3] / 480] for i in boxes[0]]
         ).cuda()
         outputs = torch.cat([classes, boxes_norm, outputs], 1)
-        padd_outputs = torch.zeros((self.max_bbox - len(outputs), 530)).cuda()
-        final_outputs = torch.cat([outputs, padd_outputs])
+        # padd_outputs = torch.zeros((self.max_bbox - len(outputs), 530)).cuda()
+        # final_outputs = torch.cat([outputs, padd_outputs])
 
-        return final_outputs
+        return outputs
 
 
 # input data and IO folder location
@@ -108,9 +111,9 @@ seq = [
     "VID43",
 ]
 
-folder_head = "/media/camma/DATA/SurgicalVQA/CholecT50-challenge-train/data/"  # fill out with your your path
+data_folder = "/kaggle/input/cholect45/CholecT45/data/"  # fill out with your your path
 
-txt_folder = "./dataset_construction/data/qa_txt/"
+txt_folder = "/kaggle/input/ssg-vqa/qa_txt/qa_txt/"
 folder_tail = "/*.txt"
 
 for curr_seq in seq:
@@ -119,9 +122,8 @@ for curr_seq in seq:
 new_filenames = []
 for i in filenames:
     frame_num = i.split(".txt")[0].split("/")[-1]
-    name_head = "/".join(i.split("/")[:-1])
-    name = name_head + "/%06d" % int(frame_num) + ".png"
-    name = name.replace(txt_folder, folder_head)
+    vid_id = i.split("/")[-2]
+    name = data_folder + vid_id + "/%06d" % int(frame_num) + ".png"
     new_filenames.append(name)
 
 
@@ -135,7 +137,7 @@ transform = transforms.Compose(
 
 
 # declare fearure extraction model
-feature_network = FeatureExtractor()
+feature_network = FeatureROIExtractor()
 
 # Set data parallel based on GPU
 num_gpu = torch.cuda.device_count()
@@ -147,7 +149,7 @@ if num_gpu > 0:
 feature_network = feature_network.cuda()
 feature_network.eval()
 
-scene_graph_root = "./dataset_construction/data/scene_graph"
+scene_graph_root = "/kaggle/input/scene-graph-ssg-vqa/scene_graph"
 
 
 # labels
@@ -203,17 +205,17 @@ for img_loc in tqdm(new_filenames):
 
     # save extracted features
     img_loc = img_loc.split("/")
-    save_dir = os.path.join(
-        "./dataset/roi_coord/" + img_loc[7], "vqa/img_features", "roi"
-    )
+    save_dir = "/kaggle/working/roi_coord_gt_nopad"
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     # save to file
+    file_name = f"{img_loc[-2].strip('VID') + img_loc[-1].split('.')[0][2:]}.hdf5"
+    file_path = os.path.join(save_dir, file_name)
     hdf5_file = h5py.File(
-        os.path.join(save_dir, "{}.hdf5".format(img_loc[-1].split(".")[0])), "w"
+        file_path, "w"
     )
-    print(os.path.join(save_dir, "{}.hdf5".format(img_loc[-1].split(".")[0])))
+    # print(file_path)
     hdf5_file.create_dataset("visual_features", data=visual_features)
     hdf5_file.close()
-    print("save_dir: ", save_dir, " | visual_features: ", visual_features.shape)
+    # print("visual_features: ", visual_features.shape)
