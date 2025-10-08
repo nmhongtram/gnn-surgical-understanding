@@ -223,7 +223,7 @@ def main():
     parser = argparse.ArgumentParser(description='Pre-tokenize questions with optional ana_type filtering')
     parser.add_argument('--ana_type', nargs='*', 
                        help='Filter by analysis types (e.g., --ana_type zero_hop.json one_hop.json)')
-    parser.add_argument('--modes', nargs='*', default=['debug', 'train', 'val', 'test'],
+    parser.add_argument('--modes', nargs='*', default=['debug', 'train', 'val', 'test', 'test_full'],
                        help='Modes to process (default: all)')
     
     args = parser.parse_args()
