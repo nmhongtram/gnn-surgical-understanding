@@ -3,6 +3,10 @@ checkpoints/
 questions/
 scene_graphs/
 visual_features/
+detection_model/dataset/
+detection_model/runs/
+detection_model/surgical_ssg.yaml
+tokenized_questions/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
