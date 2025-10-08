@@ -319,13 +319,13 @@ class FullEnhancedModel(nn.Module):
             nn.LayerNorm(object_class_embed_dim)
         )
         
-        # Optional: Attention mechanism for selective dimension reduction
-        self.class_embed_attention = nn.MultiheadAttention(
-            embed_dim=question_dim,
-            num_heads=8,
-            dropout=dropout_prob,
-            batch_first=True
-        )
+        # # Optional: Attention mechanism for selective dimension reduction
+        # self.class_embed_attention = nn.MultiheadAttention(
+        #     embed_dim=question_dim,
+        #     num_heads=8,
+        #     dropout=dropout_prob,
+        #     batch_first=True
+        # )
         
         self._initialize_class_embeddings()
         
