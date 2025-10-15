@@ -26,7 +26,7 @@ MANUAL_PROGRESS_INTERVAL = 10
 
 # Local imports
 from ssg_dataset import SSGDataset, vqa_only_collate_fn
-from full_enhanced_model import create_full_enhanced_model
+from model import create_full_enhanced_model
 from collections import defaultdict
 import json
 import numpy as np
@@ -554,7 +554,7 @@ def compute_distribution_similarity(true_labels, predictions, answer_vocab):
     }
 
 
-def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
+def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32, mode="test"):
     """
     Evaluate trained model on test set with analysis by question type (ana_type)
     
@@ -562,6 +562,7 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
         model_path (str): Path to trained model checkpoint
         gnn_type (str): GNN architecture type
         batch_size (int): Batch size for evaluation
+        mode (str): Dataset mode ('test', 'full_test')
     """
     
     print("🧪 Test Set Evaluation")
@@ -575,7 +576,7 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32):
     
     # Load test dataset
     print("\n📁 Loading test dataset...")
-    test_dataset = SSGDataset(mode="test")
+    test_dataset = SSGDataset(mode=mode)
     
     test_loader = DataLoader(
         test_dataset, 
@@ -925,6 +926,6 @@ if __name__ == "__main__":
     train_vqa_only(resume_from=resume_checkpoint, gnn_type='gat', use_mixed_precision=use_mixed_precision)
     
     # === EVALUATION ===
-    # model_path = "/kaggle/working/checkpoints/best_vqa_model.pth" 
-    # results = evaluate_on_test(model_path, gnn_type="gat", batch_size=32)
-    # print(f"\nFinal test accuracy: {results['overall']['accuracy']:.2f}%")
+    model_path = "/kaggle/working/checkpoints/best_vqa_model.pth" 
+    results = evaluate_on_test(model_path, gnn_type="gat", batch_size=32, mode="test")
+    print(f"\nFinal test accuracy: {results['overall']['accuracy']:.2f}%")
