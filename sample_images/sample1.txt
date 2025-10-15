@@ -1,0 +1,24 @@
+Sample 1: 220002
+Questions of Clean Test 220006:
+What is the grasper doing?|retract
+Which tool is operating on gallbladder|grasper
+What is the hook doing?|dissect
+Which tool is operating on gallbladder|hook
+What anatomy is at the top-left of the frame ?|abdominal_wall_cavity|[74.0, 117.0]
+What anatomy is at the top-mid of the frame ?|gallbladder|[267.5, 73.0]
+How many center liver anatomys are within the abdominal_wall_cavity object?|0|one_hop.json|count|NA
+What number of silver things are to the right of the abdominal_wall_cavity thing?|1|one_hop.json|count|NA
+Are there any red mid-left abdominal_wall_cavity things below the brown anatomy?|True|one_hop.json|exist|NA
+There is a brown anatomy; are there any brown liver things to the right of it?|False|one_hop.json|exist|NA
+There is a instrument that is right of the top-mid anatomy; what color is it?|white|one_hop.json|query_color|NA
+The instrument that is left of the top-mid anatomy is what color?|silver|one_hop.json|query_color|NA
+What type is the white hook object above the yellow object?|instrument|one_hop.json|query_type|NA
+What type is the center object that is horizontal the yellow thing?|anatomy|one_hop.json|query_type|NA
+There is a instrument that is to the left of the white top-mid gallbladder anatomy; what is it?|grasper|one_hop.json|query_component|NA
+There is a thing that is to the right of the white top-mid gallbladder anatomy; what is it?|hook|one_hop.json|query_component|NA
+How many anatomys are both on the left side of the silver center grasper instrument and on the right side of the bottom-mid anatomy?|0|single_and.json|count|NA
+What number of anatomys are both below the silver center grasper instrument and on the right side of the bottom-mid anatomy?|1|single_and.json|count|NA
+There is a anatomy that is above the mid-left abdominal_wall_cavity anatomy and below the center grasper object?; what is its name?|liver|single_and.json|query_component|NA
+What name is the object that is to the left of the omentum thing and below the center grasper object?|abdominal_wall_cavity|single_and.json|query_component|NA
+There is a anatomy that is both below the brown anatomy and to the right of the center grasper instrument; what color is it?|yellow|single_and.json|query_color|NA
+What is the color of the object that is both above the mid-left object and below the center grasper instrument?|brown|single_and.json|query_color|NA
