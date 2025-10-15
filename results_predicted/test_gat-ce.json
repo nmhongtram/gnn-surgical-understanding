@@ -1,0 +1,101 @@
+{
+  "overall": {
+    "accuracy": 61.58459203224923,
+    "precision_macro": 0.5420527778236626,
+    "recall_macro": 0.4999061630963243,
+    "f1_macro": 0.5070876067828513,
+    "precision_weighted": 0.6156663881354206,
+    "recall_weighted": 0.6158459203224923,
+    "f1_weighted": 0.6090771080512105,
+    "validity_score": 0.9920123422997487,
+    "distribution_similarity": 0.0,
+    "chi_square_statistic": 100002039.66554953,
+    "chi_square_p_value": 0.0,
+    "correct": 24749,
+    "total": 40187
+  },
+  "by_ana_type": {
+    "general": {
+      "accuracy": 62.45660608535838,
+      "precision": 0.5277670369821531,
+      "recall": 0.5177856422740477,
+      "f1_score": 0.5086637057585558,
+      "correct": 6117,
+      "total": 9794
+    },
+    "one_hop.json": {
+      "accuracy": 66.2985771926099,
+      "precision": 0.5588995462571498,
+      "recall": 0.49142732170806214,
+      "f1_score": 0.5064134950575298,
+      "correct": 12488,
+      "total": 18836
+    },
+    "single_and.json": {
+      "accuracy": 50.65814215870628,
+      "precision": 0.42366846570227884,
+      "recall": 0.3742109906855313,
+      "f1_score": 0.37664659887904556,
+      "correct": 5388,
+      "total": 10636
+    },
+    "zero_hop.json": {
+      "accuracy": 82.08469055374593,
+      "precision": 0.6531396896401962,
+      "recall": 0.6423332238423785,
+      "f1_score": 0.6162387155162792,
+      "correct": 756,
+      "total": 921
+    }
+  },
+  "by_query_type": {
+    "count": {
+      "accuracy": 62.18038417504135,
+      "precision": 0.38612610198091923,
+      "recall": 0.2714323066045604,
+      "f1_score": 0.2951235803158613,
+      "correct": 4888,
+      "total": 7861
+    },
+    "exist": {
+      "accuracy": 74.8155201142585,
+      "precision": 0.5081568745559571,
+      "recall": 0.4975412472270359,
+      "f1_score": 0.4959075183561252,
+      "correct": 3143,
+      "total": 4201
+    },
+    "general": {
+      "accuracy": 62.45660608535838,
+      "precision": 0.5277670369821531,
+      "recall": 0.5177856422740477,
+      "f1_score": 0.5086637057585558,
+      "correct": 6117,
+      "total": 9794
+    },
+    "query_color": {
+      "accuracy": 53.476008724100325,
+      "precision": 0.4653607469963657,
+      "recall": 0.4632676793259131,
+      "f1_score": 0.4577939796208952,
+      "correct": 3923,
+      "total": 7336
+    },
+    "query_component": {
+      "accuracy": 51.58340158340158,
+      "precision": 0.4631543266227106,
+      "recall": 0.40938533250847425,
+      "f1_score": 0.4216899964132478,
+      "correct": 3779,
+      "total": 7326
+    },
+    "query_type": {
+      "accuracy": 79.01335513763968,
+      "precision": 0.790656201995487,
+      "recall": 0.7884041737671894,
+      "f1_score": 0.7889823216403797,
+      "correct": 2899,
+      "total": 3669
+    }
+  }
+}
