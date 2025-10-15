@@ -1,31 +1,25 @@
+"""
+Full Enhanced Model - Fixed cross-modal attention issues
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GATConv, GINConv, MessagePassing
-# from torch_geometric.nn.conv.gcn_conv import gcn_norm
+from torch_geometric.nn import GCNConv, GATConv, GINConv
+from torch_geometric.nn import global_mean_pool
 from transformers import AutoTokenizer, AutoModel
+from transformers.activations import ACT2FN
 import json
-from collections import defaultdict
-import numpy as np
-
-# Graph normalization dependencies
-from torch_geometric.utils import degree
-from torch_scatter import scatter
-
+from pathlib import Path
 import config as cfg
+import math
 
 
 class GraphLayerNorm(nn.Module):
-    """
-    Graph-aware Layer Normalization adapted from GraphVQA
-    Normalizes features within each graph separately for variable graph sizes
-    """
-    
+    """Graph-aware Layer Normalization for variable-size graphs"""
     def __init__(self, in_channels, eps=1e-5, affine=True):
-        super(GraphLayerNorm, self).__init__()
-        self.in_channels = in_channels
+        super().__init__()
         self.eps = eps
-        
         if affine:
             self.weight = nn.Parameter(torch.ones(in_channels))
             self.bias = nn.Parameter(torch.zeros(in_channels))
@@ -34,506 +28,645 @@ class GraphLayerNorm(nn.Module):
             self.register_parameter('bias', None)
     
     def forward(self, x, batch=None):
-        """
-        Args:
-            x: Node features [N, D]
-            batch: Batch assignment for each node [N] (optional)
-        Returns:
-            Normalized features [N, D]
-        """
         if batch is None:
-            # Standard layer normalization
             mean = x.mean(dim=-1, keepdim=True)
             var = x.var(dim=-1, keepdim=True, unbiased=False)
             out = (x - mean) / (var + self.eps).sqrt()
         else:
-            # Graph-aware normalization using GraphVQA approach
-            batch_size = int(batch.max()) + 1
+            # Graph-aware normalization
+            unique_batch = torch.unique(batch)
+            normalized_parts = []
             
-            # Calculate normalization factor (nodes per graph * feature dimensions)
-            norm = degree(batch, batch_size, dtype=x.dtype).clamp_(min=1)
-            norm = norm.mul_(x.size(-1)).view(-1, 1)
+            for b in unique_batch:
+                mask = (batch == b)
+                x_batch = x[mask]
+                
+                mean = x_batch.mean(dim=0, keepdim=True)
+                var = x_batch.var(dim=0, keepdim=True, unbiased=False)
+                x_norm = (x_batch - mean) / (var + self.eps).sqrt()
+                normalized_parts.append(x_norm)
             
-            # Calculate mean per graph
-            mean = scatter(x, batch, dim=0, dim_size=batch_size, 
-                         reduce='add').sum(dim=-1, keepdim=True) / norm
-            
-            # Center the data by subtracting graph-specific mean from each node
-            x = x - mean[batch]
-            
-            # Calculate variance per graph using centered data
-            var = scatter(x * x, batch, dim=0, dim_size=batch_size,
-                        reduce='add').sum(dim=-1, keepdim=True) / norm
-            
-            # Normalize using graph-specific variance
-            out = x / (var.sqrt()[batch] + self.eps)
+            out = torch.cat(normalized_parts, dim=0)
         
-        # Apply learnable parameters
-        if self.weight is not None and self.bias is not None:
+        if self.weight is not None:
             out = out * self.weight + self.bias
         
         return out
 
 
-class SSGModel(nn.Module):
-    def __init__(self, num_classes=50, node_dim=516, hidden_dim=512,  # 512 or 768
-                 question_dim=768, freeze_bert=True, object_class_embed_dim=256,
-                 gnn_type='gcn'):
-        super(SSGModel, self).__init__()
-
-        self.num_classes = num_classes
-        self.node_dim = node_dim
-        self.hidden_dim = hidden_dim
-        self.question_dim = question_dim
-        self.gnn_type = gnn_type
-        
-        # Object class encoder - integrated directly
-        self.object_class_embed_dim = object_class_embed_dim
-        self.num_object_classes = 15
-        
-        # Load class names for object embedding initialization
-        with open(cfg.META_INFO_DIR / "objects.json") as f:
-            class_name_to_idx = json.load(f)
-            self.class_names = [''] * self.num_object_classes
-            for class_name, idx in class_name_to_idx.items():
-                if idx < self.num_object_classes:
-                    self.class_names[idx] = class_name
-        
-        # Wait to initialize class embeddings after BERT is loaded
-        
-        combined_node_dim = node_dim + object_class_embed_dim
-        
-        # Input projection
-        self.node_projection = nn.Linear(combined_node_dim, hidden_dim)
-        
-        # GNN architectures - Pure implementations for comparison
-        if gnn_type == 'gcn':
-            # Pure GCN layers
-            self.gcn_layers = nn.ModuleList([
-                GCNConv(hidden_dim, hidden_dim),
-                GCNConv(hidden_dim, hidden_dim),
-                GCNConv(hidden_dim, hidden_dim)
-            ])
-            # Graph-specific normalization for GCN (restored GraphLayerNorm)
-            self.gcn_graph_norms = nn.ModuleList([
-                GraphLayerNorm(hidden_dim) for _ in range(3)
-            ])
+class BERTStyleIntermediate(nn.Module):
+    """BERT-style intermediate feed-forward layer with GELU activation"""
+    def __init__(self, hidden_size, intermediate_size=None, hidden_act="gelu", dropout_prob=0.1):
+        super().__init__()
+        if intermediate_size is None:
+            intermediate_size = hidden_size * 4  # Standard BERT ratio
             
-        elif gnn_type == 'gat':
-            # Pure GAT layers - optimized for hidden_dim=768
-            if hidden_dim == 768:
-                head_dim = 96  # 768 // 8 = 96
-                num_heads = 8
-            elif hidden_dim == 512:
-                head_dim = 64  # 512 // 8 = 64  
-                num_heads = 8
-            else:
-                head_dim = hidden_dim // 8
-                num_heads = 8
-                
-            self.gat_layers = nn.ModuleList([
-                GATConv(hidden_dim, head_dim, heads=num_heads, edge_dim=16, dropout=0.1, concat=True),
-                GATConv(hidden_dim, head_dim, heads=num_heads, edge_dim=16, dropout=0.1, concat=True),
-                GATConv(hidden_dim, hidden_dim, heads=1, edge_dim=16, dropout=0.1, concat=False)
-            ])
-            # Graph-specific normalization for GAT (restored GraphLayerNorm)
-            self.gat_graph_norms = nn.ModuleList([
-                GraphLayerNorm(hidden_dim) for _ in range(3)
-            ])
-            
-        elif gnn_type == 'gin':
-            # Pure GIN layers  
-            self.gin_layers = nn.ModuleList([
-                GINConv(nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Linear(hidden_dim, hidden_dim)
-                )),
-                GINConv(nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.ReLU(), 
-                    nn.Linear(hidden_dim, hidden_dim)
-                )),
-                GINConv(nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Linear(hidden_dim, hidden_dim)
-                ))
-            ])
-            # Graph-specific normalization for GIN (restored GraphLayerNorm)
-            self.gin_graph_norms = nn.ModuleList([
-                GraphLayerNorm(hidden_dim) for _ in range(3)
-            ])
-            
-        elif gnn_type == 'none':
-            # Simplified baseline MLP - reduced capacity for fair GNN comparison
-            self.baseline_mlp = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim // 2),  # Reduce hidden dimension
-                nn.ReLU(),
-                nn.Dropout(0.3),  # Increase dropout for more regularization
-                nn.Linear(hidden_dim // 2, hidden_dim)  # Only 2 layers instead of 3
-            )
-            # Standard normalization for baseline
-            self.baseline_norm = nn.LayerNorm(hidden_dim)
-            
+        self.dense = nn.Linear(hidden_size, intermediate_size)
+        if isinstance(hidden_act, str):
+            self.intermediate_act_fn = ACT2FN[hidden_act]
         else:
-            raise ValueError(f"Unsupported gnn_type: {gnn_type}. Choose from 'gcn', 'gat', 'gin', 'none'")
+            self.intermediate_act_fn = hidden_act
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        return hidden_states
+
+
+class BERTStyleOutput(nn.Module):
+    """BERT-style output layer with residual connection and layer norm"""
+    def __init__(self, intermediate_size, hidden_size, dropout_prob=0.1, layer_norm_eps=1e-12):
+        super().__init__()
+        self.dense = nn.Linear(intermediate_size, hidden_size)
+        self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+class EnhancedFeedForward(nn.Module):
+    """Enhanced feed-forward network with BERT-style architecture"""
+    def __init__(self, hidden_size, intermediate_size=None, hidden_act="gelu", dropout_prob=0.1):
+        super().__init__()
+        if intermediate_size is None:
+            intermediate_size = hidden_size * 4
             
-        # BERT for question encoding
-        self.tokenizer = AutoTokenizer.from_pretrained('emilyalsentzer/Bio_ClinicalBERT')
-        self.bert_model = AutoModel.from_pretrained('emilyalsentzer/Bio_ClinicalBERT')
+        self.intermediate = BERTStyleIntermediate(hidden_size, intermediate_size, hidden_act, dropout_prob)
+        self.output = BERTStyleOutput(intermediate_size, hidden_size, dropout_prob)
         
-        if freeze_bert:
-            for param in self.bert_model.parameters():
-                param.requires_grad = False
-            print("BERT parameters frozen - using as feature extractor only")
+    def forward(self, hidden_states):
+        intermediate_output = self.intermediate(hidden_states)
+        layer_output = self.output(intermediate_output, hidden_states)
+        return layer_output
+
+
+class MultiHeadAttention(nn.Module):
+    """Fixed Multi-head attention layer compatible with our dimensions"""
+    def __init__(self, hidden_dim, num_heads=8, dropout_prob=0.1):
+        super().__init__()
+        assert hidden_dim % num_heads == 0
         
-        # Initialize object class embeddings now that BERT is available
-        self.class_embeddings = nn.Embedding(self.num_object_classes, object_class_embed_dim)
-        self.class_projection = nn.Linear(object_class_embed_dim, object_class_embed_dim)
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        
+        self.query = nn.Linear(hidden_dim, hidden_dim)
+        self.key = nn.Linear(hidden_dim, hidden_dim)
+        self.value = nn.Linear(hidden_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, hidden_dim)
+        
+        self.dropout = nn.Dropout(dropout_prob)
+        self.scale = math.sqrt(self.head_dim)
+        
+    def forward(self, query, key, value, attention_mask=None):
+        batch_size = query.size(0)
+        seq_len_q = query.size(1)
+        seq_len_k = key.size(1)
+        
+        # Linear projections
+        Q = self.query(query)  # [batch_size, seq_len_q, hidden_dim]
+        K = self.key(key)      # [batch_size, seq_len_k, hidden_dim]
+        V = self.value(value)  # [batch_size, seq_len_k, hidden_dim]
+        
+        # Reshape for multi-head attention
+        Q = Q.view(batch_size, seq_len_q, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(batch_size, seq_len_k, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+        
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            scores = scores.masked_fill(attention_mask == 0, -1e9)
+        
+        # Softmax
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        # Apply attention to values
+        context = torch.matmul(attention_weights, V)
+        
+        # Reshape and combine heads
+        context = context.transpose(1, 2).contiguous().view(
+            batch_size, seq_len_q, self.hidden_dim
+        )
+        
+        # Final output projection
+        output = self.output(context)
+        
+        return output, attention_weights
+
+
+class SceneToTextAttentionLayer(nn.Module):
+    """Fixed Scene-to-Text attention layer"""
+    def __init__(self, hidden_dim, num_heads=3, dropout_prob=0.1):
+        super().__init__()
+        self.attention = MultiHeadAttention(hidden_dim, num_heads, dropout_prob)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout_prob)
+        
+    def forward(self, text_features, scene_features):
+        """
+        text_features: [batch_size, text_seq_len, hidden_dim]  
+        scene_features: [batch_size, scene_seq_len, hidden_dim]
+        """
+        # Text attends to scene
+        attended_text, attention_weights = self.attention(
+            query=text_features,
+            key=scene_features, 
+            value=scene_features
+        )
+        
+        # Residual connection and layer norm
+        output = self.layer_norm(text_features + self.dropout(attended_text))
+        
+        return output
+
+
+class TextToSceneAttentionLayer(nn.Module):
+    """Fixed Text-to-Scene attention layer"""
+    def __init__(self, hidden_dim, num_heads=3, dropout_prob=0.1):
+        super().__init__()
+        self.attention = MultiHeadAttention(hidden_dim, num_heads, dropout_prob)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout_prob)
+        
+    def forward(self, scene_features, text_features):
+        """
+        scene_features: [batch_size, scene_seq_len, hidden_dim]
+        text_features: [batch_size, text_seq_len, hidden_dim]  
+        """
+        # Scene attends to text
+        attended_scene, attention_weights = self.attention(
+            query=scene_features,
+            key=text_features,
+            value=text_features
+        )
+        
+        # Residual connection and layer norm
+        output = self.layer_norm(scene_features + self.dropout(attended_scene))
+        
+        return output
+
+
+class TransformerEncoderLayer(nn.Module):
+    """Transformer encoder layer like VisualBERT"""
+    def __init__(self, hidden_dim, num_heads=8, intermediate_size=None, dropout_prob=0.1):
+        super().__init__()
+        if intermediate_size is None:
+            intermediate_size = hidden_dim * 4
+            
+        # Multi-head self-attention
+        self.self_attention = MultiHeadAttention(hidden_dim, num_heads, dropout_prob)
+        
+        # Feed-forward network (BERT style)
+        self.feed_forward = EnhancedFeedForward(
+            hidden_dim, 
+            intermediate_size=intermediate_size,
+            dropout_prob=dropout_prob
+        )
+        
+        # Layer norms
+        self.layer_norm1 = nn.LayerNorm(hidden_dim)
+        self.layer_norm2 = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout_prob)
+    
+    def forward(self, x, attention_mask=None):
+        # Self-attention with residual connection
+        attn_output, _ = self.self_attention(x, x, x, attention_mask)
+        attn_output = self.dropout(attn_output)
+        x = self.layer_norm1(x + attn_output)
+        
+        # Feed-forward with residual connection
+        ff_output = self.feed_forward(x)
+        x = self.layer_norm2(x + ff_output)
+        
+        return x
+
+
+class TransformerEncoder(nn.Module):
+    """Multi-layer transformer encoder like VisualBERT"""
+    def __init__(self, hidden_dim, num_layers=6, num_heads=8, dropout_prob=0.1):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads, 
+                dropout_prob=dropout_prob
+            ) for _ in range(num_layers)
+        ])
+        
+    def forward(self, x, attention_mask=None):
+        for layer in self.layers:
+            x = layer(x, attention_mask)
+        return x
+
+
+class FullEnhancedModel(nn.Module):
+    """Full Enhanced Model with cross-modal attention"""
+    
+    def __init__(
+        self, 
+        gnn_type='gcn',
+        hidden_dim=1024,
+        question_dim=768,
+        num_object_classes=15,
+        object_class_embed_dim=384,  # Increased from 256 -> 384 (divisible by 3 for attention)
+        num_classes=50,
+        bert_model_name="emilyalsentzer/Bio_ClinicalBERT",
+        num_gnn_layers=3,
+        num_transformer_layers=6,
+        num_cross_modal_layers=2,
+        dropout_prob=0.1,
+        add_cross_modal_attention=True,
+        scene_nodes_count=8  # Number of scene nodes like VisualBERT objects
+    ):
+        super().__init__()
+        
+        self.gnn_type = gnn_type
+        self.hidden_dim = hidden_dim
+        self.num_object_classes = num_object_classes
+        self.object_class_embed_dim = object_class_embed_dim
+        self.num_classes = num_classes
+        self.add_cross_modal_attention = add_cross_modal_attention
+        self.scene_nodes_count = scene_nodes_count
+        
+        # BERT for question encoding (frozen)
+        self.tokenizer = AutoTokenizer.from_pretrained(bert_model_name)
+        self.bert_model = AutoModel.from_pretrained(bert_model_name)
+        for param in self.bert_model.parameters():
+            param.requires_grad = False
+        
+        # Object class embeddings with BERT initialization
+        self.class_embeddings = nn.Embedding(num_object_classes + 1, object_class_embed_dim)
+        
+        # Advanced: Attention-based dimension reduction (learns what's important)
+        self.bert_to_class_projection = nn.Sequential(
+            # First stage: Feature extraction
+            nn.Linear(question_dim, object_class_embed_dim * 2),  # 768 -> 768
+            nn.GELU(),
+            nn.Dropout(dropout_prob),
+            
+            # Second stage: Attention-based compression
+            nn.Linear(object_class_embed_dim * 2, object_class_embed_dim),  # 768 -> 384
+            nn.LayerNorm(object_class_embed_dim)
+        )
+        
+        # # Optional: Attention mechanism for selective dimension reduction
+        # self.class_embed_attention = nn.MultiheadAttention(
+        #     embed_dim=question_dim,
+        #     num_heads=8,
+        #     dropout=dropout_prob,
+        #     batch_first=True
+        # )
+        
         self._initialize_class_embeddings()
         
-        # Visual Token Type Embeddings (VisualBERT component)
-        self.visual_token_type_embeddings = nn.Embedding(3, hidden_dim)  # 0: text, 1: visual, 2: special
-        self.visual_position_embeddings = nn.Embedding(100, hidden_dim)  # For visual spatial positions
+        # Enhanced projections with GELU
+        self.class_projection = nn.Sequential(
+            nn.Linear(object_class_embed_dim, object_class_embed_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_prob),
+            nn.LayerNorm(object_class_embed_dim)
+        )
         
-        # Enhanced Visual Feature Preprocessing (VisualBERT style)
-        self.visual_preprocessing = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.node_projection = nn.Sequential(
+            nn.Linear(516 + object_class_embed_dim, hidden_dim),  # 516 + 384 = 900 -> hidden_dim
+            nn.GELU(),
+            nn.Dropout(dropout_prob),
             nn.LayerNorm(hidden_dim)
         )
+        
+        # Question sequence projection (for full sequence processing like VisualBERT)
+        self.question_projection = nn.Sequential(
+            nn.Linear(question_dim, hidden_dim),  # Project each token in sequence
+            nn.GELU(),
+            nn.Dropout(dropout_prob),
+            nn.LayerNorm(hidden_dim)
+        )
+        
+        # VisualBERT-style pooler (only for final classification if needed)
+        self.question_pooler = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh()  # Like VisualBERT pooler
+        )
+        
+        # GNN layers
+        self._build_gnn_layers(num_gnn_layers, dropout_prob)
+        
+        # Cross-modal attention layers (fixed)
+        if self.add_cross_modal_attention:
+            self.scene_to_text_layers = nn.ModuleList([
+                SceneToTextAttentionLayer(hidden_dim, num_heads=3, dropout_prob=dropout_prob)
+                for _ in range(num_cross_modal_layers)
+            ])
             
-        # # Question projection to match graph feature dimension
-        # self.question_projection = nn.Linear(question_dim, hidden_dim)
-
-        # Enhanced Question Feature Preprocessing (symmetric với visual)
-        self.question_preprocessing = nn.Sequential(
-            nn.Linear(question_dim, hidden_dim),        # 768 → hidden_dim
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),          # hidden_dim → hidden_dim
-            nn.LayerNorm(hidden_dim)
-        )
+            self.text_to_scene_layers = nn.ModuleList([
+                TextToSceneAttentionLayer(hidden_dim, num_heads=3, dropout_prob=dropout_prob)  
+                for _ in range(num_cross_modal_layers)
+            ])
         
-        # VisualBERT-style cross-modal attention fusion
-        self.cross_modal_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
+        # Transformer encoder for final fusion
+        self.fusion_transformer = TransformerEncoder(
+            hidden_dim=hidden_dim,
+            num_layers=num_transformer_layers,
             num_heads=8,
-            dropout=0.1,
-            batch_first=True
+            dropout_prob=dropout_prob
         )
         
-        # Self-attention for refined features
-        self.self_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=8,
-            dropout=0.1,
-            batch_first=True
-        )
-        
-        # Specialized VisualBERT Scene-Text Attention Layers
-        self.scene_to_text_attention = nn.ModuleList([
-            self._create_scene_text_attention_layer(hidden_dim) for _ in range(2)
-        ])
-        
-        self.text_to_scene_attention = nn.ModuleList([
-            self._create_text_scene_attention_layer(hidden_dim) for _ in range(2)
-        ])
-        
-        # Lightweight fusion layers (replace expensive bilinear)
-        self.graph_projection = nn.Linear(hidden_dim, hidden_dim)
-        self.question_projection = nn.Linear(question_dim, hidden_dim)
-        self.fusion_norm1 = nn.LayerNorm(hidden_dim)
-        self.fusion_norm2 = nn.LayerNorm(hidden_dim)
-        
-        # Multi-task heads with stronger regularization
-        # VQA head
+        # Enhanced classification head
         self.vqa_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.3),  # Increased from 0.1 to 0.3
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),  # Additional layer
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim // 4, num_classes)
-        )     
+            nn.GELU(),
+            nn.Dropout(dropout_prob * 2),
+            nn.LayerNorm(hidden_dim // 2),
+            
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.GELU(),
+            nn.Dropout(dropout_prob * 1.5),
+            nn.LayerNorm(hidden_dim // 4),
+            
+            nn.Linear(hidden_dim // 4, self.num_classes)
+        )
+        
+        # Loss function
+        self.criterion = nn.CrossEntropyLoss()
+    
+    def _build_gnn_layers(self, num_layers, dropout_prob):
+        """Build GNN layers with enhanced feed-forward"""
+        if self.gnn_type == 'gcn':
+            self.gnn_layers = nn.ModuleList([
+                GCNConv(self.hidden_dim, self.hidden_dim) for _ in range(num_layers)
+            ])
+        elif self.gnn_type == 'gat':
+            self.gnn_layers = nn.ModuleList([
+                GATConv(
+                    self.hidden_dim, self.hidden_dim // 8, heads=8, 
+                    edge_dim=16, dropout=dropout_prob
+                ) for _ in range(num_layers)
+            ])
+        elif self.gnn_type == 'gin':
+            self.gnn_layers = nn.ModuleList([
+                GINConv(
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim, self.hidden_dim * 2),
+                        nn.GELU(),
+                        nn.Dropout(dropout_prob),
+                        nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+                    )
+                ) for _ in range(num_layers)
+            ])
+        elif self.gnn_type == 'none':
+            self.baseline_mlp = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout_prob * 3),
+                nn.Linear(self.hidden_dim // 2, self.hidden_dim)
+            )
+            self.baseline_norm = nn.LayerNorm(self.hidden_dim)
+        
+        # Enhanced normalization and feed-forward for each GNN layer
+        if self.gnn_type != 'none':
+            self.gnn_norms = nn.ModuleList([
+                GraphLayerNorm(self.hidden_dim) for _ in range(num_layers)
+            ])
+            self.gnn_feed_forwards = nn.ModuleList([
+                EnhancedFeedForward(self.hidden_dim, dropout_prob=dropout_prob)
+                for _ in range(num_layers)
+            ])
     
     def _initialize_class_embeddings(self):
-        """Initialize object class embeddings using BERT text embeddings"""
-        embeddings = []
+        """Initialize class embeddings using BERT"""
+        # Load object class names
+        with open(cfg.META_INFO_DIR / "objects.json") as f:
+            class_name_to_idx = json.load(f)
         
-        with torch.no_grad():
-            for i in range(self.num_object_classes):
-                if i < len(self.class_names):
-                    class_name = self.class_names[i]
-                    text = class_name.replace('_', ' ')
-                else:
-                    text = "unknown object"
-                
-                inputs = self.tokenizer(text, return_tensors='pt', padding=True, truncation=True)
+        class_names = [''] * (self.num_object_classes + 1)
+        for class_name, idx in class_name_to_idx.items():
+            if idx < self.num_object_classes:
+                class_names[idx] = class_name
+        
+        # Generate BERT embeddings
+        embeddings = []
+        for i in range(self.num_object_classes + 1):
+            class_name = class_names[i] if i < len(class_names) else "unknown_object"
+            text = class_name.replace('_', ' ')
+            
+            inputs = self.tokenizer(
+                text, return_tensors='pt', padding=True, 
+                truncation=True, max_length=32
+            )
+            
+            with torch.no_grad():
                 outputs = self.bert_model(**inputs)
-                cls_embedding = outputs.last_hidden_state[:, 0, :]
                 
-                if cls_embedding.shape[1] > self.object_class_embed_dim:
-                    cls_embedding = cls_embedding[:, :self.object_class_embed_dim]
-                else:
-                    padding = torch.zeros(1, self.object_class_embed_dim - cls_embedding.shape[1], 
-                                        device=cls_embedding.device, dtype=cls_embedding.dtype)
-                    cls_embedding = torch.cat([cls_embedding, padding], dim=1)
+                # Multi-scale BERT features for richer representation
+                cls_embedding = outputs.last_hidden_state[:, 0, :]  # [1, 768] - CLS token
                 
-                embeddings.append(cls_embedding.squeeze(0))
+                # Optional: Use mean pooling as additional signal
+                # sequence_mean = outputs.last_hidden_state.mean(dim=1)  # [1, 768] - Mean of all tokens
+                # combined_embedding = 0.8 * cls_embedding + 0.2 * sequence_mean  # Weighted combination
+                
+                # For now, use CLS token with learned projection
+                combined_embedding = cls_embedding
+            
+            # Option 1: Standard learned projection
+            projected_embedding = self.bert_to_class_projection(combined_embedding)  # [1, 384]
+            
+            # Option 2: Attention-based selective compression (experimental)
+            # full_sequence = outputs.last_hidden_state  # [1, seq_len, 768]
+            # attended_embedding, _ = self.class_embed_attention(
+            #     combined_embedding.unsqueeze(1),  # Query: CLS token
+            #     full_sequence,                     # Key: Full sequence  
+            #     full_sequence                      # Value: Full sequence
+            # )
+            # projected_embedding = self.bert_to_class_projection(attended_embedding.squeeze(1))
+            
+            embeddings.append(projected_embedding.squeeze(0))
         
         initial_embeddings = torch.stack(embeddings)
         self.class_embeddings.weight.data.copy_(initial_embeddings)
     
-    def _create_scene_text_attention_layer(self, hidden_dim):
-        """Create Scene-to-Text attention layer like VisualBERT"""
-        class SceneToTextAttention(nn.Module):
-            def __init__(self, hidden_dim):
-                super().__init__()
-                self.cross_attention = nn.MultiheadAttention(
-                    embed_dim=hidden_dim, num_heads=8, dropout=0.1, batch_first=True
-                )
-                self.self_attention = nn.MultiheadAttention(
-                    embed_dim=hidden_dim, num_heads=8, dropout=0.1, batch_first=True
-                )
-                self.layer_norm1 = nn.LayerNorm(hidden_dim)
-                self.layer_norm2 = nn.LayerNorm(hidden_dim)
-                self.dropout = nn.Dropout(0.1)
-                
-            def forward(self, text_features, scene_features):
-                # Cross attention: text attends to scene (correct direction)
-                attended_text, _ = self.cross_attention(
-                    text_features, scene_features, scene_features
-                )
-                attended_text = self.dropout(attended_text)
-                attended_text = self.layer_norm1(attended_text + text_features)
-                
-                # Self attention on attended features
-                self_attended, _ = self.self_attention(
-                    attended_text, attended_text, attended_text
-                )
-                self_attended = self.dropout(self_attended)
-                return self.layer_norm2(self_attended + attended_text)
-                
-        return SceneToTextAttention(hidden_dim)
-    
-    def _create_text_scene_attention_layer(self, hidden_dim):
-        """Create Text-to-Scene attention layer like VisualBERT"""
-        class TextToSceneAttention(nn.Module):
-            def __init__(self, hidden_dim):
-                super().__init__()
-                self.cross_attention = nn.MultiheadAttention(
-                    embed_dim=hidden_dim, num_heads=8, dropout=0.1, batch_first=True
-                )
-                self.self_attention = nn.MultiheadAttention(
-                    embed_dim=hidden_dim, num_heads=8, dropout=0.1, batch_first=True
-                )
-                self.layer_norm1 = nn.LayerNorm(hidden_dim)
-                self.layer_norm2 = nn.LayerNorm(hidden_dim)
-                self.dropout = nn.Dropout(0.1)
-                
-            def forward(self, text_features, scene_features):
-                # Cross attention: scene attends to text (correct direction)
-                attended_scene, _ = self.cross_attention(
-                    scene_features, text_features, text_features
-                )
-                attended_scene = self.dropout(attended_scene)
-                attended_scene = self.layer_norm1(attended_scene + scene_features)
-                
-                # Self attention on attended features
-                self_attended, _ = self.self_attention(
-                    attended_scene, attended_scene, attended_scene
-                )
-                self_attended = self.dropout(self_attended)
-                return self.layer_norm2(self_attended + attended_scene)
-                
-        return TextToSceneAttention(hidden_dim)
-                
-                
-    def forward(self, graph_data, questions):
-        device = next(self.parameters()).device
-        tokenized = questions
-        # Move pre-tokenized tensors to GPU
-        tokenized = {key: value.to(device, non_blocking=True) for key, value in tokenized.items()}
+    def _extract_multi_node_scene_features(self, node_features, batch, top_k=8):
+        """
+        Extract multi-node scene representation like VisualBERT visual objects
         
-        batch_size = tokenized['input_ids'].size(0)
-    
-        bert_outputs = self.bert_model(**tokenized)
-        question_sequence = bert_outputs.last_hidden_state  # [batch, seq_len, hidden_dim]
-        question_pooled = bert_outputs.pooler_output  # [batch, hidden_dim] - keep for fallback
+        Args:
+            node_features: [total_nodes, hidden_dim] - All node features in batch
+            batch: [total_nodes] - Batch assignment for each node
+            top_k: Number of top nodes to select per graph
+            
+        Returns:
+            scene_features: [batch_size, top_k, hidden_dim] - Multi-node scene representation
+        """
+        batch_size = int(batch.max()) + 1
+        scene_representations = []
         
-        # Encode object classes directly (no separate forward pass needed)
+        for b in range(batch_size):
+            # Get nodes for this graph
+            mask = (batch == b)
+            graph_nodes = node_features[mask]  # [num_nodes_in_graph, hidden_dim]
+            num_nodes = graph_nodes.size(0)
+            
+            if num_nodes <= top_k:
+                # If fewer nodes than top_k, use all nodes + padding
+                if num_nodes < top_k:
+                    # Pad with mean pooled representation
+                    mean_node = graph_nodes.mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                    padding = mean_node.repeat(top_k - num_nodes, 1)   # [top_k - num_nodes, hidden_dim]
+                    graph_representation = torch.cat([graph_nodes, padding], dim=0)
+                else:
+                    graph_representation = graph_nodes
+            else:
+                # Select top-k most representative nodes using multiple strategies
+                
+                # Strategy 1: Attention-based selection (most informative nodes)
+                # Compute attention scores based on feature magnitude and diversity
+                node_attention_scores = torch.sum(graph_nodes ** 2, dim=1)  # [num_nodes] - Feature magnitude
+                attention_weights = F.softmax(node_attention_scores, dim=0)
+                
+                # Strategy 2: Combine with diversity (avoid selecting similar nodes)
+                # Use feature magnitude + ensure diversity
+                node_norms = torch.norm(graph_nodes, dim=1)  # [num_nodes]
+                
+                # Select top nodes with diversity constraint
+                selected_indices = []
+                remaining_indices = list(range(num_nodes))
+                
+                # First, select the most activated node
+                first_idx = torch.argmax(node_norms).item()
+                selected_indices.append(first_idx)
+                remaining_indices.remove(first_idx)
+                
+                # Select remaining nodes ensuring diversity
+                for _ in range(top_k - 1):
+                    if not remaining_indices:
+                        break
+                        
+                    # Compute distances to already selected nodes
+                    selected_features = graph_nodes[selected_indices]  # [num_selected, hidden_dim]
+                    remaining_features = graph_nodes[remaining_indices]  # [num_remaining, hidden_dim]
+                    
+                    # Distance to closest selected node
+                    distances = torch.cdist(remaining_features.unsqueeze(0), 
+                                          selected_features.unsqueeze(0)).squeeze(0)  # [num_remaining, num_selected]
+                    min_distances = torch.min(distances, dim=1)[0]  # [num_remaining]
+                    
+                    # Balance between activation strength and diversity
+                    remaining_norms = node_norms[remaining_indices]
+                    combined_scores = 0.7 * remaining_norms + 0.3 * min_distances  # Weighted combination
+                    
+                    # Select node with highest combined score
+                    best_remaining_idx = torch.argmax(combined_scores).item()
+                    actual_idx = remaining_indices[best_remaining_idx]
+                    selected_indices.append(actual_idx)
+                    remaining_indices.remove(actual_idx)
+                
+                graph_representation = graph_nodes[selected_indices]  # [top_k, hidden_dim]
+            
+            scene_representations.append(graph_representation)
+        
+        # Stack all graph representations
+        scene_features = torch.stack(scene_representations)  # [batch_size, top_k, hidden_dim]
+        
+        return scene_features
+    
+    def forward(self, graph_data, questions_batch):
+        batch_size = questions_batch['input_ids'].shape[0]
+        
+        # Question encoding - Use FULL SEQUENCE like VisualBERT (not just CLS)
+        with torch.no_grad():
+            question_outputs = self.bert_model(**questions_batch)
+            # Get FULL question sequence: [batch_size, seq_len, hidden_dim]
+            question_sequence = question_outputs.last_hidden_state
+        
+        # Project full question sequence to model's hidden_dim
+        # question_sequence: [batch_size, seq_len, 768] -> [batch_size, seq_len, hidden_dim]
+        question_projected = self.question_projection(question_sequence)
+        
+        # Graph processing
         class_embeddings = self.class_embeddings(graph_data.class_indices)
         class_embeddings = self.class_projection(class_embeddings)
         
-        # Combine node features
         combined_features = torch.cat([graph_data.x, class_embeddings], dim=1)
         node_features = self.node_projection(combined_features)
         
-        # GNN processing with batch information
-        batch = getattr(graph_data, 'batch', None)
-        
-        if self.gnn_type == 'gcn':
-            graph_features = self._process_gcn(node_features, graph_data.edge_index, graph_data.edge_attr, batch)
-        elif self.gnn_type == 'gat':
-            graph_features = self._process_gat(node_features, graph_data.edge_index, graph_data.edge_attr, batch)
-        elif self.gnn_type == 'gin':
-            graph_features = self._process_gin(node_features, graph_data.edge_index, graph_data.edge_attr, batch)
-        elif self.gnn_type == 'none':
-            graph_features = self._process_baseline(node_features)
+        # GNN processing
+        if self.gnn_type == 'none':
+            x = self.baseline_mlp(node_features)
+            x = self.baseline_norm(x)
         else:
-            raise ValueError(f"Unsupported gnn_type: {self.gnn_type}")
-            
-        # Global pooling for each sample in batch
-        if batch is not None:
-            # Batch-wise pooling: pool nodes per graph
-            batch_size = int(batch.max()) + 1
-            pooled_graphs = []
-            for i in range(batch_size):
-                mask = (batch == i)
-                if mask.sum() > 0:
-                    graph_pool = graph_features[mask].mean(dim=0, keepdim=True)
+            x = node_features
+            for i, (gnn_layer, norm_layer, ff_layer) in enumerate(
+                zip(self.gnn_layers, self.gnn_norms, self.gnn_feed_forwards)
+            ):
+                residual = x
+                if self.gnn_type == 'gat':
+                    x = gnn_layer(x, graph_data.edge_index, graph_data.edge_attr)
                 else:
-                    graph_pool = torch.zeros(1, self.hidden_dim, device=graph_features.device)
-                pooled_graphs.append(graph_pool)
-            pooled_graph_batch = torch.cat(pooled_graphs, dim=0)  # [batch_size, hidden_dim]
-        else:
-            # Single graph case
-            pooled_graph_batch = torch.mean(graph_features, dim=0, keepdim=True)  # [1, hidden_dim]
-            pooled_graph_batch = pooled_graph_batch.repeat(batch_size, 1)  # [batch_size, hidden_dim]
+                    x = gnn_layer(x, graph_data.edge_index)
+                
+                x = norm_layer(x, graph_data.batch)
+                x = F.gelu(x)
+                x = ff_layer(x) + residual
         
-        # # Project question sequence to match graph dimension
-        # question_sequence_proj = self.question_projection(question_sequence)  # [batch, seq_len, hidden_dim]
-
-        question_sequence_proj = self.question_preprocessing(question_sequence)  # [batch, seq_len, hidden_dim]
-
-        # VisualBERT-style cross-modal fusion with specialized attention
-        # 1. Project graph features to batch dimension
-        graph_features_batch = graph_features.unsqueeze(0).repeat(batch_size, 1, 1)  # [batch, num_nodes, hidden_dim]
+        # Multi-node scene representation (like VisualBERT with multiple visual objects)
+        scene_features_0 = self._extract_multi_node_scene_features(x, graph_data.batch, top_k=self.scene_nodes_count)
         
-        # 2. Add visual token type embeddings
-        visual_token_type_ids = torch.ones(batch_size, graph_features_batch.shape[1], dtype=torch.long, device=graph_features_batch.device)
-        text_token_type_ids = torch.zeros(batch_size, question_sequence_proj.shape[1], dtype=torch.long, device=question_sequence_proj.device)
+        # Prepare features for cross-modal attention - VisualBERT style
+        # Text: Use FULL sequence [batch_size, text_seq_len, hidden_dim]
+        text_features_0 = question_projected  # Full question sequence
+        # Scene: Multi-node sequence [batch_size, top_k, hidden_dim] like VisualBERT objects
         
-        # Enhanced visual preprocessing
-        graph_preprocessed = self.visual_preprocessing(graph_features_batch)
-        graph_with_type = graph_preprocessed + self.visual_token_type_embeddings(visual_token_type_ids)
-        question_with_type = question_sequence_proj + self.visual_token_type_embeddings(text_token_type_ids)
+        # Cross-modal attention layers (fixed dimensions)
+        if self.add_cross_modal_attention:
+            for scene_to_text_layer, text_to_scene_layer in zip(
+                self.scene_to_text_layers, self.text_to_scene_layers
+            ):
+                # Text attends to scene
+                text_features = scene_to_text_layer(text_features_0, scene_features_0)
+                # Scene attends to text
+                scene_features = text_to_scene_layer(scene_features_0, text_features_0)
         
-        # 3. Apply specialized Scene-to-Text attention layers
-        scene_attended_text = question_with_type
-        for layer in self.scene_to_text_attention:
-            scene_attended_text = layer(scene_attended_text, graph_with_type)
+        # Combine for transformer: [batch_size, text_seq_len + top_k, hidden_dim] like VisualBERT
+        combined_sequence = torch.cat([text_features, scene_features], dim=1)
         
-        # 4. Apply specialized Text-to-Scene attention layers  
-        text_attended_scene = graph_with_type
-        for layer in self.text_to_scene_attention:
-            text_attended_scene = layer(text_attended_scene, scene_attended_text)
+        # Apply transformer encoder
+        transformer_output = self.fusion_transformer(combined_sequence)
         
-        # 5. Pool representations after specialized attention
-        question_attended = torch.mean(scene_attended_text, dim=1)  # [batch, hidden_dim]
-        graph_attended = torch.mean(text_attended_scene, dim=1)  # [batch, hidden_dim]
+        # Pool transformer output (use first token like BERT CLS)
+        pooled_output = transformer_output[:, 0, :]  # [batch_size, hidden_dim]
         
-        # 4. Self-attention on combined features with residual connections
-        combined = question_attended + graph_attended  # Element-wise addition
-        combined_norm = self.fusion_norm1(combined)
+        # VQA prediction
+        logits = self.vqa_head(pooled_output)
         
-        fused_attended, _ = self.self_attention(
-            combined_norm.unsqueeze(1), 
-            combined_norm.unsqueeze(1), 
-            combined_norm.unsqueeze(1)
-        )
-        fused_features = fused_attended.squeeze(1)
-        fused_features = self.fusion_norm2(fused_features + combined_norm)  # Residual connection
-        
-        # VQA-only prediction
-        vqa_logits = self.vqa_head(fused_features)
-        
-        # VQA-only: Always return just the VQA logits
-        return vqa_logits
-            
-    def _process_gcn(self, x, edge_index, edge_attr, batch=None):
-        """Pure GCN processing - GCNConv does not support edge attributes"""
-        for i, (layer, norm) in enumerate(zip(self.gcn_layers, self.gcn_graph_norms)):
-            x = layer(x, edge_index)  # GCNConv: edge_attr not supported
-            x = norm(x, batch)  # Graph-aware normalization
-            if i < len(self.gcn_layers) - 1:  # Don't apply ReLU to final layer
-                x = F.relu(x)
-        return x
-        
-    def _process_gat(self, x, edge_index, edge_attr, batch=None):
-        """Pure GAT processing - GATConv supports and uses edge attributes"""
-        for i, (layer, norm) in enumerate(zip(self.gat_layers, self.gat_graph_norms)):
-            x = layer(x, edge_index, edge_attr)  # GATConv: edge_attr supported
-            x = norm(x, batch)  # Graph-aware normalization
-            if i < len(self.gat_layers) - 1:  # Don't apply ReLU to final layer
-                x = F.relu(x)
-        return x
-        
-    def _process_gin(self, x, edge_index, edge_attr, batch=None):
-        """Pure GIN processing - Standard GINConv does not support edge attributes"""
-        for i, (layer, norm) in enumerate(zip(self.gin_layers, self.gin_graph_norms)):
-            x = layer(x, edge_index)  # GINConv: edge_attr not supported in standard form
-            x = norm(x, batch)  # Graph-aware normalization
-            if i < len(self.gin_layers) - 1:  # Don't apply ReLU to final layer
-                x = F.relu(x)
-        return x
-        
-    def _process_baseline(self, x):
-        """Baseline processing - No GNN, just MLP on node features"""
-        x = self.baseline_mlp(x)
-        x = self.baseline_norm(x)
-        return x
-
-    def _focal_loss(self, predictions, targets, alpha=1.0, gamma=2.0):
-        """
-        Focal Loss for addressing class imbalance without prior class weights
-        
-        Paper: "Focal Loss for Dense Object Detection" (Lin et al.)
-        NOTE: Currently not used - kept for potential ablation studies
-        
-        Args:
-            predictions: Logits [batch_size, num_classes]
-            targets: Class labels [batch_size] (not one-hot)
-            alpha: Weighting factor for rare class (default: 1.0 - no weighting)
-            gamma: Focusing parameter (default: 2.0)
-        
-        Returns:
-            Focal loss value
-        """
-        # Compute softmax probabilities
-        log_probs = F.log_softmax(predictions, dim=-1)
-        probs = torch.exp(log_probs)
-        
-        # Get probabilities for true classes
-        log_probs_for_targets = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-        probs_for_targets = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-        
-        # Compute focal weight: (1 - p_t)^gamma
-        focal_weight = torch.pow(1 - probs_for_targets, gamma)
-        
-        # Apply alpha weighting (optional)
-        alpha_weight = alpha
-        
-        # Final focal loss
-        focal_loss = -alpha_weight * focal_weight * log_probs_for_targets
-        
-        return focal_loss.mean()
+        return logits
     
-    def compute_vqa_only_loss(self, outputs, vqa_labels):
-        """
-        Standard VQA-only loss computation using cross entropy
-        
-        Args:
-            outputs: VQA logits [batch_size, num_classes]
-            vqa_labels: VQA ground truth labels [batch_size]
-            
-        Returns:
-            VQA loss (scalar tensor)
-        """
-        # Use standard cross entropy loss (VQA community standard)
-        return F.cross_entropy(outputs, vqa_labels)
+    def compute_loss(self, logits, labels):
+        return self.criterion(logits, labels)
+
+
+def create_full_enhanced_model(**kwargs):
+    """Factory function to create full enhanced model"""
+    return FullEnhancedModel(**kwargs)
+
+
+if __name__ == "__main__":
+    model = create_full_enhanced_model(
+        gnn_type='gat',
+        hidden_dim=768,
+        num_transformer_layers=3,
+        num_cross_modal_layers=2,
+        add_cross_modal_attention=True,
+        scene_nodes_count=8  # Multi-node scene representation
+    )
+    
+    print(f"Full enhanced model with multi-node scenes: {sum(p.numel() for p in model.parameters() if p.requires_grad):,} parameters")
+    print(f"Scene representation: {model.scene_nodes_count} nodes per graph (like VisualBERT objects)")
