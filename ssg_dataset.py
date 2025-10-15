@@ -22,7 +22,7 @@ class SSGDataset(Dataset):
     
     Args:
         ana_type: Analysis types to filter (for compatibility only)
-        mode: Dataset split (debug, train, val, test)
+        mode: Dataset split (debug, train, val, test, full_test)
     """
 
     def __init__(self, ana_type=[], mode="debug"):
