@@ -6,7 +6,10 @@ visual_features/
 detection_model/dataset/
 detection_model/runs/
 detection_model/surgical_ssg.yaml
+detection_model/prediction_results
+detection_model/test.zip
 tokenized_questions/
+checkpoints_full/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
