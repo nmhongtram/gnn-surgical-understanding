@@ -869,13 +869,20 @@ class VQAPipeline:
                     avg_text_to_scene = torch.stack(text_to_scene_att).mean(dim=0)
                     avg_text_to_scene = avg_text_to_scene.mean(dim=1)  # Average heads: [batch, scene, text]
                     
-                    # Sum across text tokens to get per-node importance
-                    cross_modal_node_importance = avg_text_to_scene[0].sum(dim=1).cpu().numpy()  # [scene_nodes]
+                    # Use variance across text tokens to capture attention distribution differences
+                    # Since attention is normalized (sum=1.0), variance better shows which nodes get focused attention
+                    cross_modal_node_importance = avg_text_to_scene[0].var(dim=1).cpu().numpy()  # [scene_nodes]
+                    
+                    # Optional: Keep minimal debug for model comparison
+                    # print(f"   → Variance per node: {avg_text_to_scene[0].var(dim=1)}")
                     
                     print(f"   → Cross-modal shape: {avg_text_to_scene[0].shape}")
                     print(f"   → Cross-modal node importance shape: {cross_modal_node_importance.shape}")
                     print(f"   → Number of bboxes (including full frame): {len(bboxes)}")
                     print(f"   → Node importance range: [{cross_modal_node_importance.min():.4f}, {cross_modal_node_importance.max():.4f}]")
+                    
+                    # Optional: Simplified debug for production
+                    print(f"🔍 {model_type.upper()} Cross-modal attention range: [{cross_modal_node_importance.min():.4f}, {cross_modal_node_importance.max():.4f}]")
                     
                     # Match size with bboxes (which includes full frame node)
                     num_bboxes = len(bboxes)
@@ -918,6 +925,9 @@ class VQAPipeline:
                     print(f"   → Transformer node importance shape: {transformer_node_importance.shape}")
                     print(f"   → Number of bboxes (including full frame): {len(bboxes)}")
                     print(f"   → Node importance range: [{transformer_node_importance.min():.4f}, {transformer_node_importance.max():.4f}]")
+                    
+                    # Optional: Simplified debug for production
+                    print(f"🔍 {model_type.upper()} Transformer attention range: [{transformer_node_importance.min():.4f}, {transformer_node_importance.max():.4f}]")
                     
                     # IMPORTANT: Transformer operates on top_k scene nodes (default 8)
                     # Graph has: [top_k objects + full_frame_node]
@@ -1143,9 +1153,12 @@ def create_attention_heatmap(image, attention_weights, question):
             if node_importance is None or len(node_importance) == 0:
                 return None
             
-            # Normalize
+            # Normalize with enhanced contrast for small variance values
             node_importance = np.array(node_importance)
             if node_importance.max() > 0:
+                # For cross-modal attention (small variance values), apply square root to enhance contrast
+                if node_importance.max() < 0.01:  # Small variance values
+                    node_importance = np.sqrt(node_importance)
                 node_importance = node_importance / node_importance.max()
             
             # Map to spatial regions
@@ -1202,6 +1215,10 @@ def create_attention_heatmap(image, attention_weights, question):
         print(f"   → GAT importance: {attention_weights.get('gat_node_importance') is not None}")
         print(f"   → Cross-modal importance: {attention_weights.get('cross_modal_node_importance') is not None}")
         print(f"   → Transformer importance: {attention_weights.get('transformer_node_importance') is not None}")
+        
+        # Optional: Keep minimal debug
+        # cross_modal_importance = attention_weights.get('cross_modal_node_importance')
+        # transformer_importance = attention_weights.get('transformer_node_importance')
         
         # Only keep 2 attention maps: Before Fusion and After Fusion
         # Skip GAT attention (too low-level for VQA interpretation)
