@@ -11,6 +11,13 @@ detection_model/test.zip
 tokenized_questions/
 checkpoints_full/
 
+checkpoints.zip
+questions.zip
+scene_graphs.zip
+tokenized_questions.zip
+visual_features.zip
+dataset.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
