@@ -13,10 +13,8 @@ Minimally Invasive Surgery (MIS), particularly Laparoscopic Cholecystectomy (LC)
 ![GNN-SurgVQA Architecture](images/Overview.drawio.svg)
 *GNN-SurgVQA Architecture*
 
-## II. Repository Structure
-The repository is organized as follows:
 
-## III. Environment Setup and Installation
+## II. Environment Setup and Installation
 To ensure reproducibility and facilitate deployment, the GNN-SurgVQA framework is distributed with environment configuration files for both demonstration and training purposes. The following steps outline the recommended procedure for setting up the computational environment and installing all necessary dependencies:
 
 **Prerequisites**
