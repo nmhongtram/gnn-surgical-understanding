@@ -13,8 +13,9 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast, GradScaler  # ✨ Mixed Precision imports
 from tqdm import tqdm
 import time
+import argparse
 
-import config as cfg
+import src.config as cfg
 
 # Configure tqdm for Kaggle environment
 tqdm.pandas()
@@ -25,8 +26,8 @@ USE_TQDM = True
 MANUAL_PROGRESS_INTERVAL = 10
 
 # Local imports
-from ssg_dataset import SSGDataset, vqa_only_collate_fn
-from model import create_full_enhanced_model
+from src.ssg_dataset import SSGDataset, vqa_only_collate_fn
+from src.model import create_full_enhanced_model
 from collections import defaultdict
 import json
 import numpy as np
@@ -912,20 +913,63 @@ def evaluate_on_test(model_path, gnn_type="gcn", batch_size=32, mode="test"):
     return results
 
 
+# if __name__ == "__main__":
+#     # === TRAINING WITH MIXED PRECISION ===
+#     resume_checkpoint = None
+    
+#     # Enable mixed precision training
+#     # Set to False if you want to disable mixed precision
+#     use_mixed_precision = True
+    
+#     print(f"Mixed Precision Training: {'ENABLED' if use_mixed_precision else 'DISABLED'}")
+    
+#     # Uncomment to train
+#     train_vqa_only(resume_from=resume_checkpoint, gnn_type='gat', use_mixed_precision=use_mixed_precision)
+    
+#     # === EVALUATION ===
+#     model_path = "/kaggle/working/checkpoints/best_vqa_model.pth" 
+#     results = evaluate_on_test(model_path, gnn_type="gat", batch_size=32, mode="test")
+#     print(f"\nFinal test accuracy: {results['overall']['accuracy']:.2f}%")
+
+
 if __name__ == "__main__":
-    # === TRAINING WITH MIXED PRECISION ===
-    resume_checkpoint = None
-    
-    # 🚀 Enable mixed precision training
-    # Set to False if you want to disable mixed precision
-    use_mixed_precision = True
-    
-    print(f"🎯 Mixed Precision Training: {'ENABLED' if use_mixed_precision else 'DISABLED'}")
-    
-    # Uncomment to train
-    train_vqa_only(resume_from=resume_checkpoint, gnn_type='gat', use_mixed_precision=use_mixed_precision)
-    
-    # === EVALUATION ===
-    model_path = "/kaggle/working/checkpoints/best_vqa_model.pth" 
-    results = evaluate_on_test(model_path, gnn_type="gat", batch_size=32, mode="test")
-    print(f"\nFinal test accuracy: {results['overall']['accuracy']:.2f}%")
+    parser = argparse.ArgumentParser(description="Train or evaluate VQA-only model (mixed precision supported).")
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument("--train", action="store_true", help="Run training (train_vqa_only).")
+    group.add_argument("--eval", action="store_true", help="Run evaluation (evaluate_on_test).")
+    group.add_argument("--all", action="store_true", help="Run both training then evaluation.")
+
+    # Common options
+    parser.add_argument("--gnn-type", type=str, default="gat", help="GNN type to use (default: gat).")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from.")
+    parser.add_argument("--mixed-precision", dest="mixed_precision", action="store_true", help="Enable mixed precision (default).")
+    parser.add_argument("--no-mixed-precision", dest="mixed_precision", action="store_false", help="Disable mixed precision.")
+    parser.set_defaults(mixed_precision=True)
+
+    # Evaluation-specific
+    parser.add_argument("--model-path", type=str, default="/kaggle/working/checkpoints/best_vqa_model.pth", help="Path to model checkpoint for evaluation.")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for evaluation.")
+    parser.add_argument("--eval-mode", type=str, default="test", choices=["test", "full_test"], help="Dataset mode for evaluation.")
+
+    # Training-specific
+    parser.add_argument("--epochs", type=int, default=None, help="Override number of training epochs (if supported by train function).")
+    parser.add_argument("--train-gnn-type", type=str, default=None, help="If set, overrides --gnn-type for training only.")
+
+    args = parser.parse_args()
+
+    # If nothing specified, show help
+    if not (args.train or args.eval or args.all):
+        parser.print_help()
+        exit(0)
+
+    # Run training
+    if args.train or args.all:
+        print(f"Mixed Precision Training: {'ENABLED' if args.mixed_precision else 'DISABLED'}")
+        train_gnn = args.train_gnn_type if args.train_gnn_type else args.gnn_type
+        # Pass resume and mixed precision flags through
+        train_vqa_only(resume_from=args.resume, gnn_type=train_gnn, use_mixed_precision=args.mixed_precision)
+
+    # Run evaluation
+    if args.eval or args.all:
+        results = evaluate_on_test(args.model_path, gnn_type=args.gnn_type, batch_size=args.batch_size, mode=args.eval_mode)
+        print(f"\nFinal test accuracy: {results['overall']['accuracy']:.2f}%")
