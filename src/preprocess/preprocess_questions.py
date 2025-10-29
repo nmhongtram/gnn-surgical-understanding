@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 from tqdm import tqdm
 import numpy as np
 
-import config as cfg
+import src.config as cfg
 
 
 # Valid ana_type values to avoid confusion with coordinates or other attributes
