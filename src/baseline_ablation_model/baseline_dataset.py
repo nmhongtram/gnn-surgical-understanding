@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 import numpy as np
 from tqdm import tqdm
 
-import config as cfg
+import src.config as cfg
 
 
 class FullFrameBaselineDataset(Dataset):

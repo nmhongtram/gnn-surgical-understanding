@@ -58,8 +58,8 @@ except ImportError:
 
 # Local imports
 try:
-    import config as cfg
-    from model import create_full_enhanced_model
+    import src.config as cfg
+    from src.model import create_full_enhanced_model
 except ImportError as e:
     print(f"⚠️ Some local imports failed: {e}")
     print("Make sure you're running from the correct directory")

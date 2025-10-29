@@ -15,7 +15,7 @@ from torch.cuda.amp import autocast, GradScaler  # ✨ Mixed Precision imports
 from tqdm import tqdm
 import time
 
-import config as cfg
+import src.config as cfg
 
 # Configure tqdm for Kaggle environment
 tqdm.pandas()

@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, AutoModel
 from transformers.activations import ACT2FN
 import json
 from pathlib import Path
-import config as cfg
+import src.config as cfg
 import math
 
 

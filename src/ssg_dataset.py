@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data, Batch
 from tqdm import tqdm
 
-import config as cfg
+import src.config as cfg
 
 
 class SSGDataset(Dataset):
