@@ -130,6 +130,27 @@ python src/train_vqa_only.py --all
   - <model_path>_test_results.json — detailed metrics per question type and overall
   - Console prints of aggregated metrics
 
+## III. Dataset
+The dataset can be accessed and downloaded from the following Google Drive link:
+[Dataset](https://drive.google.com/drive/folders/1Jfh3oSjgfJb9MjWoMJyZnAJWrScxoQsK?usp=sharing)
+
+The folder containing the SSG-VQA dataset [1, 2] includes:
+
+- detection_data/: dataset folder used for detection model YOLOv8n, which includes:
+  + best.pt: best model checkpoint after 50 epochs
+  + dataset.zip
+  + surgical_ssg.yaml
+- visual_features.zip: Image features (HDF5 file)
+- questions.zip: Questions (TXT file)
+- tokenized_questions.zip: Question tokens (HDF5 file)
+- scene_graphs.zip: Scene Graph (JSON file)
+- checkpoints.zip: Model checkpoints from the final epoch
+- meta_info/: Meta information
+- images/: Contains all the figures used in the research paper, including flowcharts, dataset illustrations, and other visual representations
+
+
+
+
 ## References
 [1] K. Yuan, M. Kattel, J. L. Lavanchy, N. Navab, V. Srivastav, and N. Padoy, "Advancing surgical VQA with scene graph knowledge," International Journal of Computer Assisted Radiology and Surgery, vol. 19, no. 7, pp. 1409-1417, 2024/07/01 2024.
 
